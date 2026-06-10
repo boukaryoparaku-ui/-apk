@@ -1,0 +1,12 @@
+{
+  "appId": "com.dooker.inventory",
+  "appName": "服装供销存",
+  "webDir": "www",
+  "android": {
+    "allowMixedContent": true
+  },
+  "server": {
+    "androidScheme": "http",
+    "cleartext": true
+  }
+}

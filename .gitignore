@@ -1,0 +1,23 @@
+node_modules
+dist
+.env
+
+# SQLite 数据库文件与会话文件，不入库
+*.db
+*.db-journal
+*.sqlite
+prisma/*.db
+prisma/*.db-journal
+sessions/
+backups/
+
+# rclone 配置含网盘凭据 + 二进制，不入库
+tools/rclone.conf
+tools/rclone.exe
+
+# 旧数据库转储，含真实业务数据，不入库（避免推到远端泄露）
+database/*.sql
+
+npm-debug.log
+*.log
+.DS_Store
