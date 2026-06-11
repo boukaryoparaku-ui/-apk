@@ -410,6 +410,177 @@ nav button.active::before {
   width: 92px;
 }
 
+/* 客户 / 款号 搜索框 + 推荐下拉（参考聚水潭开单） */
+.search-box {
+  position: relative;
+}
+
+.search-box > input {
+  width: 100%;
+}
+
+.search-suggest {
+  position: absolute;
+  z-index: 30;
+  top: calc(100% + 4px);
+  left: 0;
+  right: 0;
+  max-height: 280px;
+  overflow-y: auto;
+  background: var(--surface);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-sm);
+  box-shadow: var(--shadow-md);
+  padding: 4px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.search-suggest-item {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 12px;
+  width: 100%;
+  text-align: left;
+  padding: 8px 10px;
+  background: transparent;
+  border: none;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  color: var(--text);
+}
+
+.search-suggest-item:hover {
+  background: var(--accent-soft);
+}
+
+.search-suggest-item.create {
+  color: var(--accent);
+  font-weight: 600;
+}
+
+.search-suggest-item .suggest-name {
+  font-weight: 600;
+}
+
+.search-suggest-item .suggest-meta {
+  color: var(--text-muted);
+  font-size: 13px;
+  white-space: nowrap;
+}
+
+.customer-field,
+.style-search-field {
+  position: relative;
+}
+
+.customer-form-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(160px, 1fr));
+  gap: 10px;
+  align-items: end;
+}
+
+.row-actions {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.link-button {
+  background: none;
+  border: none;
+  padding: 0;
+  color: var(--accent);
+  font-weight: 600;
+  cursor: pointer;
+  text-align: left;
+}
+
+.link-button:hover {
+  text-decoration: underline;
+}
+
+.customer-orders-detail {
+  margin-top: 18px;
+  padding-top: 16px;
+  border-top: 1px solid var(--border);
+}
+
+.customer-orders-detail-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 12px;
+  margin-bottom: 12px;
+}
+
+.customer-orders-detail-header h3 {
+  margin: 0 0 2px;
+}
+
+.order-list-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: end;
+  gap: 10px;
+  margin: 14px 0 10px;
+}
+
+.order-list-toolbar label {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 13px;
+  color: var(--text-soft);
+}
+
+.select-col {
+  width: 40px;
+  text-align: center;
+}
+
+.printed-badge {
+  display: inline-block;
+  margin-left: 6px;
+  padding: 1px 7px;
+  border-radius: 999px;
+  background: var(--success-soft);
+  color: var(--success);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.stock-doc-row {
+  cursor: pointer;
+}
+
+.stock-doc-row:hover {
+  background: var(--accent-soft);
+}
+
+.stock-doc-detail-row > td {
+  background: var(--surface-muted);
+  padding: 0;
+}
+
+.stock-doc-detail {
+  padding: 12px 16px;
+}
+
+.stock-doc-items {
+  width: 100%;
+  background: var(--surface);
+  border-radius: var(--radius-sm);
+}
+
+.stock-doc-items th,
+.stock-doc-items td {
+  padding: 6px 10px;
+}
+
 .sales-action-col {
   width: 82px;
 }
@@ -907,6 +1078,10 @@ tr:last-child td {
     grid-column: auto;
   }
 
+  .customer-form-grid {
+    grid-template-columns: 1fr;
+  }
+
   .sales-add-row label {
     max-width: none;
     min-width: 0;
@@ -925,6 +1100,108 @@ tr:last-child td {
   .toolbar input,
   .toolbar.wrap > * {
     max-width: none;
+  }
+}
+
+/* 手机竖屏专项优化：放大点击区、收紧留白、防输入聚焦缩放 */
+@media (max-width: 480px) {
+  .content {
+    padding: 16px 14px;
+  }
+
+  .panel {
+    padding: 16px 14px;
+  }
+
+  h1 {
+    font-size: 22px;
+  }
+
+  h2 {
+    font-size: 18px;
+    margin-bottom: 14px;
+  }
+
+  /* 16px 以上可避免移动端聚焦输入框时页面自动放大 */
+  input,
+  select,
+  textarea {
+    font-size: 16px;
+  }
+
+  input,
+  select {
+    height: 44px;
+  }
+
+  .primary,
+  .ghost,
+  .small,
+  .upload-button {
+    height: 44px;
+    min-height: 44px;
+  }
+
+  /* 导航按钮加高更易点 */
+  nav {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 6px;
+  }
+
+  nav button {
+    height: 44px;
+    font-size: 15px;
+  }
+
+  /* 指标卡两列排，节省竖向空间 */
+  .topbar {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 10px;
+  }
+
+  .metric {
+    min-height: 72px;
+    padding: 12px 14px;
+  }
+
+  .metric strong {
+    font-size: 22px;
+  }
+
+  /* 宽表格横滑更顺滑 + 提示可滑动 */
+  .table-wrap,
+  .matrix-wrap,
+  .ai-result-table-wrap,
+  .quick-matrix-wrap {
+    -webkit-overflow-scrolling: touch;
+    overflow-x: auto;
+  }
+
+  /* 表格单元格内边距收紧，单屏能看到更多列 */
+  th,
+  td {
+    padding: 10px 12px;
+  }
+
+  /* 矩阵录入格加高，手指更好点 */
+  .matrix-input {
+    width: 64px;
+    height: 40px;
+  }
+
+  .sales-lines-table input {
+    height: 40px;
+  }
+
+  /* 订单/操作按钮组占满宽度，避免拥挤 */
+  .order-actions,
+  .ai-upload-actions {
+    width: 100%;
+  }
+
+  /* 备份卡片单列 */
+  .backup-grid {
+    grid-template-columns: 1fr;
   }
 }
 

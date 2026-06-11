@@ -33,6 +33,18 @@ model UserAiConfig {
   @@map("user_ai_configs")
 }
 
+model Customer {
+  id        Int             @id @default(autoincrement())
+  name      String          @unique
+  phone     String?
+  note      String?
+  createdAt DateTime        @default(now())
+  updatedAt DateTime        @updatedAt
+  orders    CustomerOrder[]
+
+  @@map("customers")
+}
+
 model Product {
   id        Int      @id @default(autoincrement())
   styleNo   String   @unique
@@ -132,12 +144,14 @@ model OutboundOrderItem {
 model CustomerOrder {
   id              Int                 @id @default(autoincrement())
   customer        String
+  customerId      Int?
   orderNo         String?
   channel         String?
   orderDate       DateTime
   note            String?
   status          String              @default("PENDING")
   shippedAt       DateTime?
+  printedAt       DateTime?
   outboundOrderId Int?                @unique
   amountDue       Decimal             @default(0)
   paidAmount      Decimal             @default(0)
@@ -153,6 +167,7 @@ model CustomerOrder {
   updatedAt       DateTime            @updatedAt
   items           CustomerOrderItem[]
   outboundOrder   OutboundOrder?      @relation(fields: [outboundOrderId], references: [id])
+  customerRef     Customer?           @relation(fields: [customerId], references: [id])
 
   @@map("customer_orders")
 }

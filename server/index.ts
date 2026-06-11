@@ -523,12 +523,14 @@ function formatCustomerOrder(order: any) {
   return {
     id: order.id,
     customer: order.customer,
+    customerId: order.customerId ?? null,
     orderNo: order.orderNo ?? "",
     channel: order.channel ?? "",
     orderDate: order.orderDate,
     note: order.note ?? "",
     status: order.status,
     shippedAt: order.shippedAt,
+    printedAt: order.printedAt ?? null,
     outboundOrderId: order.outboundOrderId,
     createdAt: order.createdAt,
     amountDue,
@@ -706,7 +708,19 @@ function customerOrderMatrix(order: FormattedCustomerOrder) {
   return { sizes, rows: matrixRows, sizeTotals, total };
 }
 
-async function customerOrderPdfBuffer(order: FormattedCustomerOrder, templateInput: unknown) {
+type PdfLayout = {
+  template: ReturnType<typeof normalizePrintTemplate>;
+  paperWidth: number;
+  paperHeight: number;
+  margin: number;
+  pageWidth: number;
+  pageHeight: number;
+  contentWidth: number;
+  compact: boolean;
+  fontPath: string | null;
+};
+
+function buildPdfLayout(templateInput: unknown): PdfLayout {
   const template = normalizePrintTemplate(templateInput);
   const paperWidth = clampNumber(template.paperWidthMm, Number(defaultPrintTemplate.paperWidthMm), 40, 420);
   const paperHeight = clampNumber(template.paperHeightMm, Number(defaultPrintTemplate.paperHeightMm), 30, 420);
@@ -716,21 +730,16 @@ async function customerOrderPdfBuffer(order: FormattedCustomerOrder, templateInp
   const contentWidth = pageWidth - margin * 2;
   const compact = paperWidth <= 120 || paperHeight <= 90;
   const fontPath = pdfFontPath();
-  const doc = new PDFDocument({ size: [pageWidth, pageHeight], margin, autoFirstPage: true });
-  const chunks: Buffer[] = [];
+  return { template, paperWidth, paperHeight, margin, pageWidth, pageHeight, contentWidth, compact, fontPath };
+}
+
+// 在已创建的文档上绘制单张订单的内容（不创建文档、不结束文档、不负责翻页到下一单）
+function drawCustomerOrderToDoc(doc: PDFKit.PDFDocument, order: FormattedCustomerOrder, layout: PdfLayout) {
+  const { template, paperWidth, paperHeight, margin, pageWidth, pageHeight, contentWidth, compact, fontPath } = layout;
   const matrix = customerOrderMatrix(order);
   const orderAmount = Number(order.amountDue || 0);
 
-  doc.on("data", (chunk: Buffer) => chunks.push(chunk));
-  const done = new Promise<Buffer>((resolve, reject) => {
-    doc.on("end", () => resolve(Buffer.concat(chunks)));
-    doc.on("error", reject);
-  });
-
-  if (fontPath) {
-    doc.registerFont("cn", fontPath);
-    doc.font("cn");
-  }
+  if (fontPath) doc.font("cn");
 
   const titleFontSize = clampNumber(template.titleFontSizePx, compact ? 17 : 24, 10, 96);
   const customerFontSize = clampNumber(template.customerFontSizePx, compact ? 28 : 42, 12, 120);
@@ -894,7 +903,37 @@ async function customerOrderPdfBuffer(order: FormattedCustomerOrder, templateInp
   }
 
   drawPdfFooter();
+}
 
+function collectPdfBuffer(doc: PDFKit.PDFDocument) {
+  const chunks: Buffer[] = [];
+  doc.on("data", (chunk: Buffer) => chunks.push(chunk));
+  return new Promise<Buffer>((resolve, reject) => {
+    doc.on("end", () => resolve(Buffer.concat(chunks)));
+    doc.on("error", reject);
+  });
+}
+
+async function customerOrderPdfBuffer(order: FormattedCustomerOrder, templateInput: unknown) {
+  const layout = buildPdfLayout(templateInput);
+  const doc = new PDFDocument({ size: [layout.pageWidth, layout.pageHeight], margin: layout.margin, autoFirstPage: true });
+  if (layout.fontPath) doc.registerFont("cn", layout.fontPath);
+  const done = collectPdfBuffer(doc);
+  drawCustomerOrderToDoc(doc, order, layout);
+  doc.end();
+  return done;
+}
+
+// 多张订单合成一个 PDF：每张订单从新的一页开始
+async function customerOrdersPdfBuffer(orders: FormattedCustomerOrder[], templateInput: unknown) {
+  const layout = buildPdfLayout(templateInput);
+  const doc = new PDFDocument({ size: [layout.pageWidth, layout.pageHeight], margin: layout.margin, autoFirstPage: true });
+  if (layout.fontPath) doc.registerFont("cn", layout.fontPath);
+  const done = collectPdfBuffer(doc);
+  orders.forEach((order, index) => {
+    if (index > 0) doc.addPage({ size: [layout.pageWidth, layout.pageHeight], margin: layout.margin });
+    drawCustomerOrderToDoc(doc, order, layout);
+  });
   doc.end();
   return done;
 }
@@ -1616,6 +1655,108 @@ app.get(
 );
 
 app.get(
+  "/api/customers",
+  asyncHandler(async (req, res) => {
+    const q = text(req.query.q);
+    const customers = await prisma.customer.findMany({
+      where: q ? { name: { contains: q } } : undefined,
+      orderBy: { name: "asc" },
+      take: 200,
+      include: { _count: { select: { orders: true } } }
+    });
+    const ranked = q
+      ? customers
+          .map((c) => ({ c, rank: c.name.startsWith(q) ? 0 : 1 }))
+          .sort((a, b) => a.rank - b.rank || a.c.name.localeCompare(b.c.name, "zh-CN"))
+          .map((entry) => entry.c)
+      : customers;
+    res.json(
+      ranked.map((c) => ({
+        id: c.id,
+        name: c.name,
+        phone: c.phone ?? "",
+        note: c.note ?? "",
+        orderCount: c._count.orders,
+        createdAt: c.createdAt
+      }))
+    );
+  })
+);
+
+app.post(
+  "/api/customers",
+  asyncHandler(async (req, res) => {
+    const name = text(req.body.name);
+    if (!name) {
+      res.status(400).json({ error: "客户名称必填" });
+      return;
+    }
+    const existing = await prisma.customer.findUnique({ where: { name } });
+    if (existing) {
+      res.status(409).json({ error: "客户名称已存在" });
+      return;
+    }
+    const customer = await prisma.customer.create({
+      data: { name, phone: optionalText(req.body.phone), note: optionalText(req.body.note) }
+    });
+    res.status(201).json({ id: customer.id, name: customer.name, phone: customer.phone ?? "", note: customer.note ?? "", orderCount: 0, createdAt: customer.createdAt });
+  })
+);
+
+app.patch(
+  "/api/customers/:id",
+  asyncHandler(async (req, res) => {
+    const id = Number(req.params.id);
+    const name = text(req.body.name);
+    if (!name) {
+      res.status(400).json({ error: "客户名称必填" });
+      return;
+    }
+    const clash = await prisma.customer.findFirst({ where: { name, id: { not: id } } });
+    if (clash) {
+      res.status(409).json({ error: "客户名称已存在" });
+      return;
+    }
+    const customer = await prisma.customer.update({
+      where: { id },
+      data: { name, phone: optionalText(req.body.phone), note: optionalText(req.body.note) }
+    });
+    res.json({ id: customer.id, name: customer.name, phone: customer.phone ?? "", note: customer.note ?? "" });
+  })
+);
+
+app.delete(
+  "/api/customers/:id",
+  asyncHandler(async (req, res) => {
+    const id = Number(req.params.id);
+    await prisma.$transaction(async (tx) => {
+      await tx.customerOrder.updateMany({ where: { customerId: id }, data: { customerId: null } });
+      await tx.customer.delete({ where: { id } });
+    });
+    res.json({ id });
+  })
+);
+
+app.get(
+  "/api/customers/:id/orders",
+  asyncHandler(async (req, res) => {
+    const id = Number(req.params.id);
+    const customer = await prisma.customer.findUnique({ where: { id } });
+    if (!customer) {
+      res.status(404).json({ error: "客户不存在" });
+      return;
+    }
+    // 同时按 customerId 和历史单的客户名匹配，兼容关联前保存的旧单
+    const orders = await prisma.customerOrder.findMany({
+      where: { OR: [{ customerId: id }, { customer: customer.name }] },
+      include: { items: { include: { sku: { include: { product: true } } } } },
+      orderBy: { createdAt: "desc" }
+    });
+    res.json(orders.map(formatCustomerOrder));
+  })
+);
+
+app.get(
   "/api/customer-orders",
   asyncHandler(async (req, res) => {
     const status = text(req.query.status);
@@ -1651,6 +1792,58 @@ app.post(
 );
 
 app.post(
+  "/api/customer-orders/print-pdf",
+  asyncHandler(async (req, res) => {
+    const ids: number[] = Array.isArray(req.body?.ids)
+      ? req.body.ids.map((value: unknown) => Number(value)).filter((value: number) => Number.isInteger(value) && value > 0)
+      : [];
+    if (!ids.length) {
+      res.status(400).json({ error: "请提供要打印的订单 ID" });
+      return;
+    }
+    const orders = await prisma.customerOrder.findMany({
+      where: { id: { in: ids } },
+      include: { items: { include: { sku: { include: { product: true } } } } }
+    });
+    if (!orders.length) {
+      res.status(404).json({ error: "未找到对应的客户订单" });
+      return;
+    }
+    // 按传入 ids 的顺序排列，保持与勾选顺序一致
+    type LoadedOrder = (typeof orders)[number];
+    const orderById = new Map<number, LoadedOrder>(orders.map((order) => [order.id, order] as [number, LoadedOrder]));
+    const ordered = ids
+      .map((id: number) => orderById.get(id))
+      .filter((order): order is LoadedOrder => Boolean(order));
+    const formatted = ordered.map((order) => formatCustomerOrder(order));
+    const pdf = await customerOrdersPdfBuffer(formatted, req.body?.template);
+    const filename = `批量打印-${formatted.length}单.pdf`.replace(/[\\/:*?"<>|]+/g, "-");
+    res.setHeader("Content-Type", "application/pdf");
+    res.setHeader("Content-Disposition", `inline; filename*=UTF-8''${encodeURIComponent(filename)}`);
+    res.send(pdf);
+  })
+);
+
+app.post(
+  "/api/customer-orders/mark-printed",
+  asyncHandler(async (req, res) => {
+    const ids = Array.isArray(req.body?.ids)
+      ? req.body.ids.map((value: unknown) => Number(value)).filter((value: number) => Number.isInteger(value) && value > 0)
+      : [];
+    if (!ids.length) {
+      res.status(400).json({ error: "请提供要标记的订单 ID" });
+      return;
+    }
+    const printedAt = new Date();
+    const result = await prisma.customerOrder.updateMany({
+      where: { id: { in: ids } },
+      data: { printedAt }
+    });
+    res.json({ updated: result.count, printedAt });
+  })
+);
+
+app.post(
   "/api/customer-orders",
   asyncHandler(async (req, res) => {
     const customer = text(req.body.customer);
@@ -1672,9 +1865,16 @@ app.post(
       }
       const payments = paymentSnapshot(req.body, amountDue);
 
+      const customerRecord = await tx.customer.upsert({
+        where: { name: customer },
+        update: req.body.customerPhone != null ? { phone: optionalText(req.body.customerPhone) } : {},
+        create: { name: customer, phone: optionalText(req.body.customerPhone) }
+      });
+
       const created = await tx.customerOrder.create({
         data: {
           customer,
+          customerId: customerRecord.id,
           orderNo: optionalText(req.body.orderNo),
           channel: optionalText(req.body.channel),
           orderDate: req.body.orderDate ? new Date(req.body.orderDate) : new Date(),

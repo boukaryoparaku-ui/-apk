@@ -1,5 +1,14 @@
 export type User = { id: number; username: string };
 
+export type Customer = {
+  id: number;
+  name: string;
+  phone: string;
+  note: string;
+  orderCount?: number;
+  createdAt?: string;
+};
+
 export type ManagedUser = { id: number; username: string; createdAt: string };
 
 export type Sku = {
@@ -33,6 +42,60 @@ export type Movement = {
     color: string;
     size: string;
   };
+};
+
+// 入库单/出库单接口原始结构（来自 /api/inbound-orders、/api/outbound-orders）
+export type OrderApiItem = {
+  id: number;
+  quantity: number;
+  unitCost?: string | number;
+  unitPrice?: string | number;
+  sku: {
+    color: string;
+    size: string;
+    product: { styleNo: string; name: string };
+  };
+};
+
+export type InboundOrderApi = {
+  id: number;
+  supplier: string;
+  inboundDate: string;
+  note?: string | null;
+  createdAt: string;
+  items: OrderApiItem[];
+};
+
+export type OutboundOrderApi = {
+  id: number;
+  customer: string;
+  channel?: string | null;
+  outboundDate: string;
+  note?: string | null;
+  createdAt: string;
+  items: OrderApiItem[];
+};
+
+// 库存流水按单聚合后的统一结构
+export type StockDocumentItem = {
+  styleNo: string;
+  productName: string;
+  color: string;
+  size: string;
+  quantity: number;
+  unitPrice: string;
+};
+
+export type StockDocument = {
+  key: string;
+  kind: "INBOUND" | "OUTBOUND";
+  id: number;
+  date: string;
+  party: string;
+  note: string;
+  totalQuantity: number;
+  totalAmount: number;
+  items: StockDocumentItem[];
 };
 
 export type InventoryRow = {
@@ -97,12 +160,14 @@ export type SalesOrderLine = {
 export type CustomerOrder = {
   id: number;
   customer: string;
+  customerId?: number | null;
   orderNo: string;
   channel: string;
   orderDate: string;
   note: string;
   status: "PENDING" | "SHIPPED";
   shippedAt?: string | null;
+  printedAt?: string | null;
   outboundOrderId?: number | null;
   createdAt: string;
   amountDue: string;

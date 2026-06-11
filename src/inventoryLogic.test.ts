@@ -1,12 +1,16 @@
 import { describe, expect, it } from "vitest";
 import {
+  buildStockDocuments,
   collectSalesOrderItems,
   createQuickSkuForm,
+  filterStockDocuments,
+  filterStyleOptions,
   mergeRecognizedSalesItems,
   knownColorsForStyle,
   matrixKey,
   mergeRecognizedInboundItems,
   migrateQuickSkuAxis,
+  rankCustomerMatches,
   remapRecognizedItemColors,
   summarizeSalesOrder
 } from "./inventoryLogic";
@@ -223,5 +227,109 @@ describe("inventory matrix helpers", () => {
 
     expect(preserved[0].unitPrice).toBe("18");
     expect(preserved[0].quantities.M).toBe("2");
+  });
+});
+
+describe("filterStyleOptions", () => {
+  const options = [
+    { styleNo: "2605", productName: "圆领卫衣" },
+    { styleNo: "2610", productName: "连帽卫衣" },
+    { styleNo: "A100", productName: "牛仔裤" }
+  ];
+
+  it("returns all when query empty", () => {
+    expect(filterStyleOptions(options, "")).toHaveLength(3);
+  });
+
+  it("matches by styleNo prefix first", () => {
+    const result = filterStyleOptions(options, "26");
+    expect(result.map((o) => o.styleNo)).toEqual(["2605", "2610"]);
+  });
+
+  it("matches by product name", () => {
+    const result = filterStyleOptions(options, "卫衣");
+    expect(result.map((o) => o.styleNo).sort()).toEqual(["2605", "2610"]);
+  });
+
+  it("returns empty when nothing matches", () => {
+    expect(filterStyleOptions(options, "zzz")).toEqual([]);
+  });
+});
+
+describe("rankCustomerMatches", () => {
+  const customers = [
+    { name: "张三" },
+    { name: "张三丰" },
+    { name: "李四" },
+    { name: "小张" }
+  ];
+
+  it("prefix (首字) matches rank before substring", () => {
+    const result = rankCustomerMatches(customers, "张").map((c) => c.name);
+    expect(result[0]).toBe("张三");
+    expect(result).toContain("小张");
+    // 前缀命中应排在子串命中之前
+    expect(result.indexOf("张三")).toBeLessThan(result.indexOf("小张"));
+  });
+
+  it("returns all when query empty", () => {
+    expect(rankCustomerMatches(customers, "")).toHaveLength(4);
+  });
+});
+
+describe("buildStockDocuments / filterStockDocuments", () => {
+  const inbound = [
+    {
+      id: 1,
+      supplier: "供应商A",
+      inboundDate: "2026-06-10T00:00:00.000Z",
+      note: "补货",
+      createdAt: "2026-06-10T00:00:00.000Z",
+      items: [
+        { id: 1, quantity: 3, unitCost: "20", sku: { color: "红", size: "M", product: { styleNo: "2605", name: "卫衣" } } },
+        { id: 2, quantity: 2, unitCost: "20", sku: { color: "蓝", size: "L", product: { styleNo: "2605", name: "卫衣" } } }
+      ]
+    }
+  ];
+  const outbound = [
+    {
+      id: 9,
+      customer: "张三",
+      channel: "门店",
+      outboundDate: "2026-06-11T00:00:00.000Z",
+      note: "",
+      createdAt: "2026-06-11T00:00:00.000Z",
+      items: [{ id: 5, quantity: 4, unitPrice: "50", sku: { color: "红", size: "M", product: { styleNo: "A100", name: "牛仔裤" } } }]
+    }
+  ];
+
+  it("merges and sorts by date desc with totals", () => {
+    const docs = buildStockDocuments(inbound, outbound);
+    expect(docs).toHaveLength(2);
+    expect(docs[0].kind).toBe("OUTBOUND"); // 6/11 在前
+    expect(docs[0].totalQuantity).toBe(4);
+    expect(docs[0].totalAmount).toBe(200);
+    expect(docs[0].party).toBe("张三（门店）");
+    expect(docs[1].kind).toBe("INBOUND");
+    expect(docs[1].totalQuantity).toBe(5);
+    expect(docs[1].totalAmount).toBe(100);
+  });
+
+  it("filters by kind", () => {
+    const docs = buildStockDocuments(inbound, outbound);
+    expect(filterStockDocuments(docs, { kind: "INBOUND" })).toHaveLength(1);
+    expect(filterStockDocuments(docs, { kind: "OUTBOUND" })[0].id).toBe(9);
+  });
+
+  it("filters by keyword across party and items", () => {
+    const docs = buildStockDocuments(inbound, outbound);
+    expect(filterStockDocuments(docs, { q: "牛仔" })).toHaveLength(1);
+    expect(filterStockDocuments(docs, { q: "供应商A" })).toHaveLength(1);
+    expect(filterStockDocuments(docs, { q: "不存在" })).toHaveLength(0);
+  });
+
+  it("filters by date range", () => {
+    const docs = buildStockDocuments(inbound, outbound);
+    expect(filterStockDocuments(docs, { from: "2026-06-11", to: "2026-06-11" })).toHaveLength(1);
   });
 });

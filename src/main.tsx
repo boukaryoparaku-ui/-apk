@@ -2,6 +2,7 @@ import React, { useEffect, useMemo, useState } from "react";
 import { createRoot } from "react-dom/client";
 import {
   buildInboundFormFromStyle,
+  buildStockDocuments,
   buildStyleOptions,
   compareSizes,
   collectExistingSkuItems,
@@ -11,10 +12,13 @@ import {
   createEmptySalesOrderLine,
   createSalesOrderLineFromSkus,
   createQuickSkuForm,
+  filterStockDocuments,
+  filterStyleOptions,
   inboundDefaultSizes,
   knownColorsForStyle,
   mergeRecognizedInboundItems,
   mergeRecognizedSalesItems,
+  rankCustomerMatches,
   remapRecognizedItemColors,
   salesLineQuantity,
   salesLineSubtotal,
@@ -24,7 +28,7 @@ import {
   supplierFromStyle
 } from "./inventoryLogic";
 import { InventoryMatrix, QuickSkuMatrix, SkuQuantityMatrix } from "./matrixComponents";
-import type { CustomerOrder, ManagedUser, Movement, QuickSkuForm, RecognizedInboundItem, SalesOrderLine, SalesOrderPayments, Sku, User } from "./types";
+import type { Customer, CustomerOrder, InboundOrderApi, ManagedUser, OutboundOrderApi, QuickSkuForm, RecognizedInboundItem, SalesOrderLine, SalesOrderPayments, Sku, StockDocument, User } from "./types";
 import "./styles.css";
 
 const appBuildLabel = "FE 2026-06-10 delete-order-rollback-v6";
@@ -460,7 +464,8 @@ function exportCustomerOrderImage(order: CustomerOrder) {
   }, "image/png");
 }
 
-function printCustomerOrder(order: CustomerOrder, template: PrintTemplateSettings) {
+function buildOrderPrintPage(order: CustomerOrder, ctx: ReturnType<typeof buildPrintContext>) {
+  const { template, compact, customerFontSize, amountFontSize, templateTitle, extraContent, customerLabel, amountLabel, qrImageUrl, qrLabel, printTimeText } = ctx;
   const matrix = buildCustomerOrderMatrix(order);
   const orderAmount = Number(order.amountDue || 0);
   const headers = ["款号", "商品名称", "颜色", "单价", ...matrix.sizes, "数量"];
@@ -473,6 +478,58 @@ function printCustomerOrder(order: CustomerOrder, template: PrintTemplateSetting
     String(row.total)
   ]);
   const summary = ["合计", "", "", "", ...matrix.sizes.map((size) => (matrix.sizeTotals[size] ? String(matrix.sizeTotals[size]) : "")), String(matrix.total)];
+  const matrixHtml = template.showMatrix
+    ? `
+  <table class="order-matrix">
+    <thead>
+      <tr>${headers.map((header, index) => `<th class="${index === 1 ? "left" : ""}">${escapeHtml(header)}</th>`).join("")}</tr>
+    </thead>
+    <tbody>
+      ${rows
+        .map((row) => `<tr>${row.map((value, index) => `<td class="${index === 1 ? "left" : ""}">${escapeHtml(value || "-")}</td>`).join("")}</tr>`)
+        .join("")}
+    </tbody>
+    <tfoot>
+      <tr>${summary.map((value, index) => `<td class="${index === 1 ? "left" : ""}">${escapeHtml(value || "")}</td>`).join("")}</tr>
+    </tfoot>
+  </table>`
+    : "";
+  return `
+  <div class="print-page">
+    <section class="print-header">
+      <div class="main-panel">
+        <h1>${escapeHtml(templateTitle)}</h1>
+        <div class="hero">
+          <div class="hero-block customer-block">
+            <div class="hero-label">${escapeHtml(customerLabel)}</div>
+            <div class="customer-name fit-text" data-max-font="${customerFontSize}" data-min-font="${compact ? 16 : 20}">${escapeHtml(order.customer)}</div>
+          </div>
+          <div class="hero-block amount-block">
+            <div class="hero-label">${escapeHtml(amountLabel)}</div>
+            <div class="order-amount fit-text" data-max-font="${amountFontSize}" data-min-font="${compact ? 16 : 20}">${escapeHtml(formatMoneyValue(orderAmount))}</div>
+          </div>
+        </div>
+        ${extraContent ? `<div class="extra">${escapeHtmlWithBreaks(extraContent)}</div>` : ""}
+      </div>
+      <div class="side-panel">
+        <div class="qr-box">
+          ${qrImageUrl ? `<img src="${escapeHtml(qrImageUrl)}" alt="${escapeHtml(qrLabel)}" />` : `<div class="qr-placeholder">${escapeHtml(qrLabel)}</div>`}
+        </div>
+        <div class="qr-label">${escapeHtml(qrLabel)}</div>
+      </div>
+    </section>
+    ${matrixHtml}
+    <div class="footer">
+      <div class="watermark">
+        <div>打印时间：${escapeHtml(printTimeText)}</div>
+        <div>合计数量：${escapeHtml(matrix.total)}　订单金额：${escapeHtml(formatMoneyValue(orderAmount))}</div>
+      </div>
+      <div class="address">${escapeHtml(footerContactText)}</div>
+    </div>
+  </div>`;
+}
+
+function buildPrintContext(template: PrintTemplateSettings) {
   const paperWidth = clampNumber(template.paperWidthMm, Number(defaultPrintTemplate.paperWidthMm), 40, 420);
   const paperHeight = clampNumber(template.paperHeightMm, Number(defaultPrintTemplate.paperHeightMm), 30, 420);
   const margin = clampNumber(template.marginMm, Number(defaultPrintTemplate.marginMm), 0, 30);
@@ -491,22 +548,50 @@ function printCustomerOrder(order: CustomerOrder, template: PrintTemplateSetting
   const qrLabel = template.qrLabel.trim() || defaultPrintTemplate.qrLabel;
   const qrSizeMm = clampNumber(template.qrSizeMm, Number(defaultPrintTemplate.qrSizeMm), 12, 80);
   const customCss = template.customCss.trim();
-  const matrixHtml = template.showMatrix
-    ? `
-  <table class="order-matrix">
-    <thead>
-      <tr>${headers.map((header, index) => `<th class="${index === 1 ? "left" : ""}">${escapeHtml(header)}</th>`).join("")}</tr>
-    </thead>
-    <tbody>
-      ${rows
-        .map((row) => `<tr>${row.map((value, index) => `<td class="${index === 1 ? "left" : ""}">${escapeHtml(value || "-")}</td>`).join("")}</tr>`)
-        .join("")}
-    </tbody>
-    <tfoot>
-      <tr>${summary.map((value, index) => `<td class="${index === 1 ? "left" : ""}">${escapeHtml(value || "")}</td>`).join("")}</tr>
-    </tfoot>
-  </table>`
-    : "";
+  const printTimeText = new Date().toLocaleString();
+  return {
+    template,
+    paperWidth,
+    paperHeight,
+    margin,
+    compact,
+    bodyFontSize,
+    tableFontSize,
+    titleFontSize,
+    customerFontSize,
+    amountFontSize,
+    cellPadding,
+    templateTitle,
+    extraContent,
+    customerLabel,
+    amountLabel,
+    qrImageUrl,
+    qrLabel,
+    qrSizeMm,
+    customCss,
+    printTimeText
+  };
+}
+
+function printCustomerOrders(orders: CustomerOrder[], template: PrintTemplateSettings, onPrinted?: (ids: number[]) => void) {
+  if (!orders.length) return;
+  const ctx = buildPrintContext(template);
+  const {
+    paperWidth,
+    paperHeight,
+    margin,
+    compact,
+    bodyFontSize,
+    tableFontSize,
+    titleFontSize,
+    customerFontSize,
+    amountFontSize,
+    qrSizeMm,
+    cellPadding,
+    customCss
+  } = ctx;
+  const pagesHtml = orders.map((order) => buildOrderPrintPage(order, ctx)).join("\n");
+  const titleText = orders.length === 1 ? `${orders[0].customer}-${orders[0].orderNo || `订单${orders[0].id}`}` : `批量打印（${orders.length}单）`;
   const printWindow = window.open("", "_blank", "width=1120,height=760");
   if (!printWindow) {
     window.alert("浏览器拦截了打印窗口，请允许弹窗后重试。");
@@ -518,7 +603,7 @@ function printCustomerOrder(order: CustomerOrder, template: PrintTemplateSetting
 <html>
 <head>
   <meta charset="utf-8" />
-  <title>${escapeHtml(order.customer)}-${escapeHtml(order.orderNo || `订单${order.id}`)}</title>
+  <title>${escapeHtml(titleText)}</title>
   <style>
     * { box-sizing: border-box; }
     body {
@@ -657,10 +742,23 @@ function printCustomerOrder(order: CustomerOrder, template: PrintTemplateSetting
       background: #fff7dc;
       font-weight: 700;
     }
+    .print-page {
+      position: relative;
+      box-sizing: border-box;
+      width: calc(${paperWidth}mm - ${margin * 2}mm);
+      max-width: calc(${paperWidth}mm - ${margin * 2}mm);
+      min-height: calc(${paperHeight}mm - ${margin * 2}mm);
+      break-inside: avoid;
+      page-break-inside: avoid;
+    }
+    .print-page:not(:last-child) {
+      break-after: page;
+      page-break-after: always;
+    }
     .footer {
-      position: fixed;
-      left: ${margin}mm;
-      right: ${margin}mm;
+      position: absolute;
+      left: 0;
+      right: 0;
       bottom: ${compact ? 1.2 : 1.8}mm;
       height: ${compact ? 10 : 14}mm;
       color: #4b5563;
@@ -698,36 +796,7 @@ function printCustomerOrder(order: CustomerOrder, template: PrintTemplateSetting
   </style>
 </head>
 <body>
-  <section class="print-header">
-    <div class="main-panel">
-      <h1>${escapeHtml(templateTitle)}</h1>
-      <div class="hero">
-        <div class="hero-block customer-block">
-          <div class="hero-label">${escapeHtml(customerLabel)}</div>
-          <div class="customer-name fit-text" data-max-font="${customerFontSize}" data-min-font="${compact ? 16 : 20}">${escapeHtml(order.customer)}</div>
-        </div>
-        <div class="hero-block amount-block">
-          <div class="hero-label">${escapeHtml(amountLabel)}</div>
-          <div class="order-amount fit-text" data-max-font="${amountFontSize}" data-min-font="${compact ? 16 : 20}">${escapeHtml(formatMoneyValue(orderAmount))}</div>
-        </div>
-      </div>
-      ${extraContent ? `<div class="extra">${escapeHtmlWithBreaks(extraContent)}</div>` : ""}
-    </div>
-    <div class="side-panel">
-      <div class="qr-box">
-        ${qrImageUrl ? `<img src="${escapeHtml(qrImageUrl)}" alt="${escapeHtml(qrLabel)}" />` : `<div class="qr-placeholder">${escapeHtml(qrLabel)}</div>`}
-      </div>
-      <div class="qr-label">${escapeHtml(qrLabel)}</div>
-    </div>
-  </section>
-  ${matrixHtml}
-  <div class="footer">
-    <div class="watermark">
-      <div>打印时间：${escapeHtml(new Date().toLocaleString())}</div>
-      <div>合计数量：${escapeHtml(matrix.total)}　订单金额：${escapeHtml(formatMoneyValue(orderAmount))}</div>
-    </div>
-    <div class="address">${escapeHtml(footerContactText)}</div>
-  </div>
+  ${pagesHtml}
   <script>
     function fitTextToBox() {
       document.querySelectorAll(".fit-text").forEach((element) => {
@@ -742,18 +811,69 @@ function printCustomerOrder(order: CustomerOrder, template: PrintTemplateSetting
         }
       });
     }
-    window.onload = () => {
+    function runPrint() {
       fitTextToBox();
       window.focus();
       window.print();
+    }
+    window.onload = () => {
+      // 等一帧，确保按 .print-page 的真实打印宽度完成布局后再测量缩放
+      requestAnimationFrame(() => requestAnimationFrame(runPrint));
     };
   </script>
 </body>
 </html>`);
   printWindow.document.close();
+  if (onPrinted) onPrinted(orders.map((order) => order.id));
 }
 
-async function printCustomerOrderPdf(order: CustomerOrder, template: PrintTemplateSettings) {
+function printCustomerOrder(order: CustomerOrder, template: PrintTemplateSettings, onPrinted?: (ids: number[]) => void) {
+  printCustomerOrders([order], template, onPrinted);
+}
+
+// 用隐藏 iframe 加载 PDF 并自动弹出打印对话框，省去在 PDF 预览页二次点击。
+// 注：系统打印对话框里的“打印/确定”按钮浏览器不允许网页自动点击，无法跳过。
+function printPdfBlob(blob: Blob) {
+  const url = URL.createObjectURL(blob);
+  const iframe = document.createElement("iframe");
+  iframe.style.position = "fixed";
+  iframe.style.right = "0";
+  iframe.style.bottom = "0";
+  iframe.style.width = "0";
+  iframe.style.height = "0";
+  iframe.style.border = "0";
+  iframe.src = url;
+
+  let cleaned = false;
+  const cleanup = () => {
+    if (cleaned) return;
+    cleaned = true;
+    window.setTimeout(() => {
+      URL.revokeObjectURL(url);
+      iframe.remove();
+    }, 60_000);
+  };
+
+  iframe.onload = () => {
+    try {
+      const frameWindow = iframe.contentWindow;
+      if (!frameWindow) throw new Error("no frame window");
+      frameWindow.focus();
+      frameWindow.print();
+      // 打印对话框关闭后清理；某些浏览器不触发 afterprint，用兜底定时器
+      frameWindow.addEventListener?.("afterprint", cleanup);
+      window.setTimeout(cleanup, 60_000);
+    } catch {
+      // iframe 打印不可用时，退回新标签页打开
+      window.open(url, "_blank", "width=1120,height=760");
+      cleanup();
+    }
+  };
+
+  document.body.appendChild(iframe);
+}
+
+async function printCustomerOrderPdf(order: CustomerOrder, template: PrintTemplateSettings, onPrinted?: (ids: number[]) => void) {
   const response = await fetch(`/api/customer-orders/${order.id}/print-pdf`, {
     method: "POST",
     credentials: "include",
@@ -769,9 +889,30 @@ async function printCustomerOrderPdf(order: CustomerOrder, template: PrintTempla
     return;
   }
   const blob = await response.blob();
-  const url = URL.createObjectURL(blob);
-  window.open(url, "_blank", "width=1120,height=760");
-  window.setTimeout(() => URL.revokeObjectURL(url), 60_000);
+  printPdfBlob(blob);
+  if (onPrinted) onPrinted([order.id]);
+}
+
+async function printCustomerOrdersPdf(orders: CustomerOrder[], template: PrintTemplateSettings, onPrinted?: (ids: number[]) => void) {
+  if (!orders.length) return;
+  const ids = orders.map((order) => order.id);
+  const response = await fetch(`/api/customer-orders/print-pdf`, {
+    method: "POST",
+    credentials: "include",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ ids, template })
+  });
+  if (!response.ok) {
+    const contentType = response.headers.get("content-type") || "";
+    const message = contentType.includes("application/json")
+      ? ((await response.json().catch(() => ({}))) as ApiError).error
+      : await response.text().catch(() => "");
+    window.alert(message || "批量 PDF 生成失败");
+    return;
+  }
+  const blob = await response.blob();
+  printPdfBlob(blob);
+  if (onPrinted) onPrinted(ids);
 }
 
 function Login({ onLogin }: { onLogin: (user: User) => void }) {
@@ -870,7 +1011,7 @@ function App() {
   const [tab, setTab] = useState("inventory");
   const [skus, setSkus] = useState<Sku[]>([]);
   const [allSkus, setAllSkus] = useState<Sku[]>([]);
-  const [movements, setMovements] = useState<Movement[]>([]);
+  const [stockDocuments, setStockDocuments] = useState<StockDocument[]>([]);
   const [customerOrders, setCustomerOrders] = useState<CustomerOrder[]>([]);
   const [query, setQuery] = useState("");
   const [message, setMessage] = useState("");
@@ -904,6 +1045,14 @@ function App() {
   const [customerOrderAiResult, setCustomerOrderAiResult] = useState<AiParseResponse | null>(null);
   const [backupLoading, setBackupLoading] = useState(false);
   const [managedUsers, setManagedUsers] = useState<ManagedUser[]>([]);
+  const [customers, setCustomers] = useState<Customer[]>([]);
+  const [customerForm, setCustomerForm] = useState({ name: "", phone: "", note: "" });
+  const [editingCustomerId, setEditingCustomerId] = useState<number | null>(null);
+  const [viewingCustomer, setViewingCustomer] = useState<Customer | null>(null);
+  const [viewingCustomerOrders, setViewingCustomerOrders] = useState<CustomerOrder[]>([]);
+  const [customerOrdersLoading, setCustomerOrdersLoading] = useState(false);
+  const [orderListDate, setOrderListDate] = useState(() => today());
+  const [selectedOrderIds, setSelectedOrderIds] = useState<number[]>([]);
   const [newUserForm, setNewUserForm] = useState({ username: "", password: "" });
   const [printTemplate, setPrintTemplate] = useState<PrintTemplateSettings>(() => loadPrintTemplateSettings());
 
@@ -937,7 +1086,7 @@ function App() {
   }, [customerOrder, customerOrderLines]);
 
   async function refreshAll() {
-    await Promise.all([loadSkus(), loadAllSkus(), loadMovements(), loadCustomerOrders()]);
+    await Promise.all([loadSkus(), loadAllSkus(), loadMovements(), loadCustomerOrders(), loadCustomers()]);
   }
 
   async function loadSkus(search = query) {
@@ -951,17 +1100,79 @@ function App() {
   }
 
   async function loadMovements() {
-    const params = new URLSearchParams();
-    Object.entries(movementFilters).forEach(([key, value]) => {
-      if (value) params.set(key, value);
-    });
-    const data = await api<Movement[]>(`/api/stock-movements?${params.toString()}`);
-    setMovements(data);
+    const [inbound, outbound] = await Promise.all([
+      api<InboundOrderApi[]>("/api/inbound-orders"),
+      api<OutboundOrderApi[]>("/api/outbound-orders")
+    ]);
+    setStockDocuments(buildStockDocuments(inbound, outbound));
   }
 
   async function loadCustomerOrders() {
     const data = await api<CustomerOrder[]>("/api/customer-orders");
     setCustomerOrders(data);
+  }
+
+  async function loadCustomers() {
+    try {
+      const data = await api<Customer[]>("/api/customers");
+      setCustomers(data);
+    } catch (err) {
+      setError((err as Error).message);
+    }
+  }
+
+  async function createCustomer(event: React.FormEvent) {
+    event.preventDefault();
+    const name = customerForm.name.trim();
+    if (!name) {
+      setError("客户名称必填");
+      return;
+    }
+    await submitWithFeedback(async () => {
+      if (editingCustomerId) {
+        await api<Customer>(`/api/customers/${editingCustomerId}`, { method: "PATCH", body: JSON.stringify(customerForm) });
+      } else {
+        await api<Customer>("/api/customers", { method: "POST", body: JSON.stringify(customerForm) });
+      }
+      setCustomerForm({ name: "", phone: "", note: "" });
+      setEditingCustomerId(null);
+    }, editingCustomerId ? "客户已更新" : "客户已新建");
+  }
+
+  function editCustomer(customer: Customer) {
+    setEditingCustomerId(customer.id);
+    setCustomerForm({ name: customer.name, phone: customer.phone || "", note: customer.note || "" });
+  }
+
+  async function viewCustomerOrders(customer: Customer) {
+    setViewingCustomer(customer);
+    setViewingCustomerOrders([]);
+    setCustomerOrdersLoading(true);
+    setError("");
+    try {
+      const data = await api<CustomerOrder[]>(`/api/customers/${customer.id}/orders`);
+      setViewingCustomerOrders(data);
+    } catch (err) {
+      setError((err as Error).message);
+      setViewingCustomer(null);
+    } finally {
+      setCustomerOrdersLoading(false);
+    }
+  }
+
+  async function deleteCustomer(customer: Customer) {
+    if (!window.confirm(`确认删除客户「${customer.name}」？${customer.orderCount ? `\n该客户有 ${customer.orderCount} 张历史单，删除后这些单的客户档案关联会解除（订单本身保留）。` : ""}`)) return;
+    await submitWithFeedback(async () => {
+      await api(`/api/customers/${customer.id}`, { method: "DELETE" });
+      if (editingCustomerId === customer.id) {
+        setEditingCustomerId(null);
+        setCustomerForm({ name: "", phone: "", note: "" });
+      }
+      if (viewingCustomer?.id === customer.id) {
+        setViewingCustomer(null);
+        setViewingCustomerOrders([]);
+      }
+    }, "客户已删除");
   }
 
   async function loadAiConfig() {
@@ -1441,6 +1652,30 @@ function App() {
     }, "客户订单已发货，库存已扣减");
   }
 
+  async function markOrdersPrinted(ids: number[]) {
+    if (!ids.length) return;
+    try {
+      await api<{ updated: number; printedAt: string }>("/api/customer-orders/mark-printed", {
+        method: "POST",
+        body: JSON.stringify({ ids })
+      });
+      const printedAt = new Date().toISOString();
+      setCustomerOrders((current) => current.map((order) => (ids.includes(order.id) ? { ...order, printedAt } : order)));
+    } catch (err) {
+      setError((err as Error).message);
+    }
+  }
+
+  function printSelectedOrders() {
+    const selected = filteredCustomerOrders.filter((order) => selectedOrderIds.includes(order.id));
+    if (!selected.length) {
+      setError("请先勾选要打印的订单");
+      return;
+    }
+    printCustomerOrdersPdf(selected, printTemplate, markOrdersPrinted);
+    setSelectedOrderIds([]);
+  }
+
   async function deleteCustomerOrder(order: CustomerOrder) {
     const total = order.items.reduce((sum, item) => sum + item.quantity, 0);
     const rollbackHint = order.status === "SHIPPED" ? `\n该订单已扣库存，删除后会自动回退 ${total} 件库存。` : "";
@@ -1498,6 +1733,14 @@ function App() {
     [allSkus, selectedOutboundStyle]
   );
   const salesSizes = useMemo(() => salesOrderSizes(customerOrderLines), [customerOrderLines]);
+  const filteredCustomerOrders = useMemo(
+    () => (orderListDate ? customerOrders.filter((order) => order.orderDate.slice(0, 10) === orderListDate) : customerOrders),
+    [customerOrders, orderListDate]
+  );
+  const filteredStockDocuments = useMemo(
+    () => filterStockDocuments(stockDocuments, { kind: movementFilters.type, q: movementFilters.q, from: movementFilters.from, to: movementFilters.to }),
+    [stockDocuments, movementFilters]
+  );
   if (loading) return <main className="loading">加载中</main>;
   if (!user) return <Login onLogin={setUser} />;
 
@@ -1515,6 +1758,7 @@ function App() {
             ["sku", "SKU 管理"],
             ["inbound", "库存入库"],
             ["customer-orders", "销售开单"],
+            ["customers", "客户管理"],
             ["settings", "设置"],
             ["outbound", "库存出库"],
             ["movements", "库存流水"],
@@ -1796,9 +2040,24 @@ function App() {
               </div>
 
               <div className="sales-header-grid">
-                <label>
+                <label className="customer-field">
                   客户
-                  <input value={customerOrder.customer} onChange={(event) => setCustomerOrder({ ...customerOrder, customer: event.target.value })} required />
+                  <CustomerSearchBox
+                    value={customerOrder.customer}
+                    customers={customers}
+                    onSelect={(c) => setCustomerOrder({ ...customerOrder, customer: c.name, customerId: c.id })}
+                    onTextChange={(name) => setCustomerOrder({ ...customerOrder, customer: name, customerId: null })}
+                    onCreate={async (name) => {
+                      try {
+                        const created = await api<Customer>("/api/customers", { method: "POST", body: JSON.stringify({ name }) });
+                        setCustomers((current) => [created, ...current.filter((c) => c.id !== created.id)]);
+                        setCustomerOrder((order) => ({ ...order, customer: created.name, customerId: created.id }));
+                        setMessage(`已新建客户「${created.name}」`);
+                      } catch (err) {
+                        setError((err as Error).message);
+                      }
+                    }}
+                  />
                 </label>
                 <label>
                   店员
@@ -1823,26 +2082,17 @@ function App() {
               </div>
 
               <div className="sales-add-row">
-                <label>
+                <label className="style-search-field">
                   选择款号
-                  <select
-                    value={selectedCustomerOrderStyle}
-                    onChange={(event) => {
-                      setSelectedCustomerOrderStyle(event.target.value);
+                  <StyleSearchBox
+                    options={styleOptions}
+                    onPick={(styleNo) => {
+                      setSelectedCustomerOrderStyle(styleNo);
                       setCustomerOrderAiResult(null);
+                      addCustomerOrderStyleLine(styleNo);
                     }}
-                  >
-                    <option value="">请选择款号</option>
-                    {styleOptions.map((option) => (
-                      <option key={option.styleNo} value={option.styleNo}>
-                        {option.styleNo} / {option.productName}
-                      </option>
-                    ))}
-                  </select>
+                  />
                 </label>
-                <button className="small" type="button" onClick={() => addCustomerOrderStyleLine()} disabled={!selectedCustomerOrderStyle}>
-                  货品+
-                </button>
                 <button className="small" type="button" onClick={() => addCustomerOrderStyleLine("")}>
                   空白行
                 </button>
@@ -1933,7 +2183,155 @@ function App() {
               <SalesOrderLineTable sizes={salesSizes} lines={customerOrderLines} setLines={setCustomerOrderLines} />
               <p className="hint">保存销售开单会立即创建出库单、扣减库存并写入库存流水；历史待发货订单仍可在列表中发货扣库存。</p>
             </form>
-            <CustomerOrderTable orders={customerOrders} onShip={shipCustomerOrder} onDelete={deleteCustomerOrder} printTemplate={printTemplate} />
+            <div className="order-list-toolbar">
+              <label>
+                按日期查看
+                <input type="date" value={orderListDate} onChange={(event) => setOrderListDate(event.target.value)} />
+              </label>
+              <button className="small" type="button" onClick={() => setOrderListDate(today())}>
+                今日
+              </button>
+              <button className="ghost" type="button" onClick={() => setOrderListDate("")}>
+                全部
+              </button>
+              <span className="hint">
+                {orderListDate ? `${orderListDate} 共 ${filteredCustomerOrders.length} 单` : `全部 ${filteredCustomerOrders.length} 单`}
+              </span>
+              <button className="primary" type="button" onClick={printSelectedOrders} disabled={!selectedOrderIds.length}>
+                批量打印{selectedOrderIds.length ? `（${selectedOrderIds.length}）` : ""}
+              </button>
+            </div>
+            <CustomerOrderTable
+              orders={filteredCustomerOrders}
+              onShip={shipCustomerOrder}
+              onDelete={deleteCustomerOrder}
+              printTemplate={printTemplate}
+              onPrinted={markOrdersPrinted}
+              selectedIds={selectedOrderIds}
+              setSelectedIds={setSelectedOrderIds}
+            />
+          </Panel>
+        )}
+
+        {tab === "customers" && (
+          <Panel title="客户管理">
+            <form onSubmit={createCustomer} className="form-block customer-form">
+              <div className="customer-form-grid">
+                <label>
+                  客户名称
+                  <input value={customerForm.name} onChange={(event) => setCustomerForm({ ...customerForm, name: event.target.value })} required />
+                </label>
+                <label>
+                  电话
+                  <input value={customerForm.phone} onChange={(event) => setCustomerForm({ ...customerForm, phone: event.target.value })} placeholder="选填" />
+                </label>
+                <label>
+                  备注
+                  <input value={customerForm.note} onChange={(event) => setCustomerForm({ ...customerForm, note: event.target.value })} placeholder="选填" />
+                </label>
+              </div>
+              <div className="sales-actions">
+                <button className="primary" type="submit">
+                  {editingCustomerId ? "保存修改" : "新建客户"}
+                </button>
+                {editingCustomerId && (
+                  <button className="ghost" type="button" onClick={() => { setEditingCustomerId(null); setCustomerForm({ name: "", phone: "", note: "" }); }}>
+                    取消编辑
+                  </button>
+                )}
+                <span className="hint">共 {customers.length} 位客户</span>
+              </div>
+            </form>
+            <div className="table-wrap">
+              <table>
+                <thead>
+                  <tr>
+                    <th>客户名称</th>
+                    <th>电话</th>
+                    <th>备注</th>
+                    <th>历史单</th>
+                    <th>操作</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {customers.length ? (
+                    customers.map((customer) => (
+                      <tr key={customer.id}>
+                        <td>
+                          <button className="link-button" type="button" onClick={() => viewCustomerOrders(customer)}>
+                            {customer.name}
+                          </button>
+                        </td>
+                        <td>{customer.phone || "-"}</td>
+                        <td>{customer.note || "-"}</td>
+                        <td className="number-cell">{customer.orderCount ?? 0}</td>
+                        <td>
+                          <div className="row-actions">
+                            <button className="small" type="button" onClick={() => viewCustomerOrders(customer)}>
+                              查看订单
+                            </button>
+                            <button className="small" type="button" onClick={() => editCustomer(customer)}>
+                              编辑
+                            </button>
+                            <button className="small danger-button" type="button" onClick={() => deleteCustomer(customer)}>
+                              删除
+                            </button>
+                          </div>
+                        </td>
+                      </tr>
+                    ))
+                  ) : (
+                    <tr>
+                      <td colSpan={5} className="empty">
+                        暂无客户，可在此新建，或在销售开单时输入新名字自动建档
+                      </td>
+                    </tr>
+                  )}
+                </tbody>
+              </table>
+            </div>
+
+            {viewingCustomer && (
+              <div className="customer-orders-detail">
+                <div className="customer-orders-detail-header">
+                  <div>
+                    <h3>
+                      {viewingCustomer.name} 的订单
+                      {viewingCustomer.phone ? <span className="hint"> · {viewingCustomer.phone}</span> : null}
+                    </h3>
+                    {!customerOrdersLoading && (
+                      <p className="hint">
+                        共 {viewingCustomerOrders.length} 张单，合计{" "}
+                        {viewingCustomerOrders.reduce((sum, order) => sum + order.items.reduce((s, item) => s + item.quantity, 0), 0)} 件
+                      </p>
+                    )}
+                  </div>
+                  <button className="ghost" type="button" onClick={() => { setViewingCustomer(null); setViewingCustomerOrders([]); }}>
+                    收起
+                  </button>
+                </div>
+                {customerOrdersLoading ? (
+                  <p className="hint">加载中…</p>
+                ) : (
+                  <CustomerOrderTable
+                    orders={viewingCustomerOrders}
+                    onShip={async (order) => {
+                      await shipCustomerOrder(order);
+                      await viewCustomerOrders(viewingCustomer);
+                    }}
+                    onDelete={async (order) => {
+                      await deleteCustomerOrder(order);
+                      await viewCustomerOrders(viewingCustomer);
+                    }}
+                    printTemplate={printTemplate}
+                    onPrinted={async (ids) => {
+                      await markOrdersPrinted(ids);
+                      if (viewingCustomer) await viewCustomerOrders(viewingCustomer);
+                    }}
+                  />
+                )}
+              </div>
+            )}
           </Panel>
         )}
 
@@ -1954,25 +2352,26 @@ function App() {
         )}
 
         {tab === "movements" && (
-          <Panel title="库存流水">
+          <Panel title="库存流水 - 按单据">
             <div className="toolbar wrap">
               <input
-                placeholder="搜索 SKU"
+                placeholder="搜索款号/商品名/颜色/客户/供应商"
                 value={movementFilters.q}
                 onChange={(event) => setMovementFilters({ ...movementFilters, q: event.target.value })}
               />
               <select value={movementFilters.type} onChange={(event) => setMovementFilters({ ...movementFilters, type: event.target.value })}>
-                <option value="">全部类型</option>
-                <option value="INBOUND">入库</option>
-                <option value="OUTBOUND">出库</option>
+                <option value="">全部单据</option>
+                <option value="INBOUND">入库单</option>
+                <option value="OUTBOUND">出库/销售单</option>
               </select>
               <input type="date" value={movementFilters.from} onChange={(event) => setMovementFilters({ ...movementFilters, from: event.target.value })} />
               <input type="date" value={movementFilters.to} onChange={(event) => setMovementFilters({ ...movementFilters, to: event.target.value })} />
-              <button className="primary" onClick={loadMovements}>
-                筛选
+              <button className="ghost" type="button" onClick={() => setMovementFilters({ q: "", type: "", from: "", to: "" })}>
+                清除
               </button>
+              <span className="hint">共 {filteredStockDocuments.length} 张单据</span>
             </div>
-            <MovementTable movements={movements} />
+            <StockDocumentTable documents={filteredStockDocuments} />
           </Panel>
         )}
 
@@ -2361,6 +2760,134 @@ function SkuTable({ skus, onToggle, showActions }: { skus: Sku[]; onToggle: (sku
   );
 }
 
+function CustomerSearchBox({
+  value,
+  customers,
+  onSelect,
+  onTextChange,
+  onCreate
+}: {
+  value: string;
+  customers: Customer[];
+  onSelect: (customer: Customer) => void;
+  onTextChange: (name: string) => void;
+  onCreate: (name: string) => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const matches = useMemo(() => rankCustomerMatches(customers, value, 8), [customers, value]);
+  const trimmed = value.trim();
+  const exact = customers.some((c) => c.name === trimmed);
+  const showCreate = !!trimmed && !exact;
+
+  return (
+    <div className="search-box">
+      <input
+        value={value}
+        placeholder="搜索客户名称，输入新名字可新建"
+        autoComplete="off"
+        required
+        onFocus={() => setOpen(true)}
+        onChange={(event) => {
+          onTextChange(event.target.value);
+          setOpen(true);
+        }}
+        onBlur={() => window.setTimeout(() => setOpen(false), 150)}
+      />
+      {open && (matches.length > 0 || showCreate) && (
+        <div className="search-suggest">
+          {matches.map((customer) => (
+            <button
+              key={customer.id}
+              type="button"
+              className="search-suggest-item"
+              onMouseDown={(event) => event.preventDefault()}
+              onClick={() => {
+                onSelect(customer);
+                setOpen(false);
+              }}
+            >
+              <span className="suggest-name">{customer.name}</span>
+              <span className="suggest-meta">
+                {customer.phone ? `${customer.phone} · ` : ""}
+                {customer.orderCount ?? 0} 单
+              </span>
+            </button>
+          ))}
+          {showCreate && (
+            <button
+              type="button"
+              className="search-suggest-item create"
+              onMouseDown={(event) => event.preventDefault()}
+              onClick={() => {
+                onCreate(trimmed);
+                setOpen(false);
+              }}
+            >
+              ➕ 新建客户「{trimmed}」
+            </button>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function StyleSearchBox({
+  options,
+  onPick
+}: {
+  options: Array<{ styleNo: string; productName: string }>;
+  onPick: (styleNo: string) => void;
+}) {
+  const [query, setQuery] = useState("");
+  const [open, setOpen] = useState(false);
+  const matches = useMemo(() => filterStyleOptions(options, query, 12), [options, query]);
+
+  function pick(styleNo: string) {
+    onPick(styleNo);
+    setQuery("");
+    setOpen(false);
+  }
+
+  return (
+    <div className="search-box">
+      <input
+        value={query}
+        placeholder="搜索款号或商品名，点击即加货品行"
+        autoComplete="off"
+        onFocus={() => setOpen(true)}
+        onChange={(event) => {
+          setQuery(event.target.value);
+          setOpen(true);
+        }}
+        onKeyDown={(event) => {
+          if (event.key === "Enter") {
+            event.preventDefault();
+            if (matches[0]) pick(matches[0].styleNo);
+          }
+        }}
+        onBlur={() => window.setTimeout(() => setOpen(false), 150)}
+      />
+      {open && matches.length > 0 && (
+        <div className="search-suggest">
+          {matches.map((option) => (
+            <button
+              key={option.styleNo}
+              type="button"
+              className="search-suggest-item"
+              onMouseDown={(event) => event.preventDefault()}
+              onClick={() => pick(option.styleNo)}
+            >
+              <span className="suggest-name">{option.styleNo}</span>
+              <span className="suggest-meta">{option.productName}</span>
+            </button>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
 function SalesOrderLineTable({
   sizes,
   lines,
@@ -2486,18 +3013,47 @@ function CustomerOrderTable({
   orders,
   onShip,
   onDelete,
-  printTemplate
+  printTemplate,
+  onPrinted,
+  selectedIds,
+  setSelectedIds
 }: {
   orders: CustomerOrder[];
   onShip: (order: CustomerOrder) => void;
   onDelete: (order: CustomerOrder) => void;
   printTemplate: PrintTemplateSettings;
+  onPrinted?: (ids: number[]) => void;
+  selectedIds?: number[];
+  setSelectedIds?: React.Dispatch<React.SetStateAction<number[]>>;
 }) {
+  const selectable = !!selectedIds && !!setSelectedIds;
+  const selected = selectedIds ?? [];
+  const allSelected = selectable && orders.length > 0 && orders.every((order) => selected.includes(order.id));
+  const colSpan = selectable ? 8 : 7;
+
+  function toggleOne(id: number) {
+    setSelectedIds?.((current) => (current.includes(id) ? current.filter((value) => value !== id) : [...current, id]));
+  }
+
+  function toggleAll() {
+    setSelectedIds?.(() => (allSelected ? [] : orders.map((order) => order.id)));
+  }
+
+  function printedBadge(order: CustomerOrder) {
+    if (!order.printedAt) return null;
+    return <span className="printed-badge" title={`已打印 ${new Date(order.printedAt).toLocaleString()}`}>已打印</span>;
+  }
+
   return (
     <div className="table-wrap">
       <table>
         <thead>
           <tr>
+            {selectable && (
+              <th className="select-col">
+                <input type="checkbox" checked={allSelected} onChange={toggleAll} aria-label="全选" />
+              </th>
+            )}
             <th>状态</th>
             <th>客户</th>
             <th>客户订单</th>
@@ -2512,8 +3068,19 @@ function CustomerOrderTable({
             const total = order.items.reduce((sum, item) => sum + item.quantity, 0);
             return (
               <tr key={order.id}>
+                {selectable && (
+                  <td className="select-col">
+                    <input
+                      type="checkbox"
+                      checked={selected.includes(order.id)}
+                      onChange={() => toggleOne(order.id)}
+                      aria-label={`选择 ${order.customer} 的订单`}
+                    />
+                  </td>
+                )}
                 <td>
                   <span className={order.status === "SHIPPED" ? "status-pill shipped" : "status-pill"}>{order.status === "SHIPPED" ? "已扣库存" : "待发货"}</span>
+                  {printedBadge(order)}
                 </td>
                 <td>{order.customer}</td>
                 <td>{order.orderNo || "-"}</td>
@@ -2528,54 +3095,37 @@ function CustomerOrderTable({
                 </td>
                 <td className="number-cell">{total}</td>
                 <td>
-                  {order.status === "PENDING" ? (
-                    <div className="order-actions">
-                      <button className="small" onClick={() => exportCustomerOrderCsv(order)}>
-                        导出表格
-                      </button>
-                      <button className="small" onClick={() => exportCustomerOrderImage(order)}>
-                        导出图片
-                      </button>
-                      <button className="small" onClick={() => printCustomerOrder(order, printTemplate)}>
-                        打印订单
-                      </button>
-                      <button className="small" onClick={() => printCustomerOrderPdf(order, printTemplate)}>
-                        PDF打印
-                      </button>
+                  <div className="order-actions">
+                    <button className="small" onClick={() => exportCustomerOrderCsv(order)}>
+                      导出表格
+                    </button>
+                    <button className="small" onClick={() => exportCustomerOrderImage(order)}>
+                      导出图片
+                    </button>
+                    <button className="small" onClick={() => printCustomerOrder(order, printTemplate, onPrinted)}>
+                      打印订单
+                    </button>
+                    <button className="small" onClick={() => printCustomerOrderPdf(order, printTemplate, onPrinted)}>
+                      PDF打印
+                    </button>
+                    {order.status === "PENDING" ? (
                       <button className="small" onClick={() => onShip(order)}>
                         发货扣库存
                       </button>
-                      <button className="small danger-button" onClick={() => onDelete(order)}>
-                        删除订单
-                      </button>
-                    </div>
-                  ) : (
-                    <div className="order-actions">
-                      <button className="small" onClick={() => exportCustomerOrderCsv(order)}>
-                        导出表格
-                      </button>
-                      <button className="small" onClick={() => exportCustomerOrderImage(order)}>
-                        导出图片
-                      </button>
-                      <button className="small" onClick={() => printCustomerOrder(order, printTemplate)}>
-                        打印订单
-                      </button>
-                      <button className="small" onClick={() => printCustomerOrderPdf(order, printTemplate)}>
-                        PDF打印
-                      </button>
+                    ) : (
                       <span className="hint">出库单 #{order.outboundOrderId}</span>
-                      <button className="small danger-button" onClick={() => onDelete(order)}>
-                        删除订单
-                      </button>
-                    </div>
-                  )}
+                    )}
+                    <button className="small danger-button" onClick={() => onDelete(order)}>
+                      删除订单
+                    </button>
+                  </div>
                 </td>
               </tr>
             );
           })}
           {!orders.length && (
             <tr>
-              <td colSpan={7} className="empty">
+              <td colSpan={colSpan} className="empty">
                 暂无销售单
               </td>
             </tr>
@@ -2586,37 +3136,93 @@ function CustomerOrderTable({
   );
 }
 
-function MovementTable({ movements }: { movements: Movement[] }) {
+function StockDocumentTable({ documents }: { documents: StockDocument[] }) {
+  const [expanded, setExpanded] = useState<string | null>(null);
+
+  function toggle(key: string) {
+    setExpanded((current) => (current === key ? null : key));
+  }
+
   return (
     <div className="table-wrap">
-      <table>
+      <table className="stock-doc-table">
         <thead>
           <tr>
-            <th>时间</th>
+            <th>日期</th>
             <th>类型</th>
-            <th>SKU</th>
-            <th>变化</th>
-            <th>结存</th>
-            <th>操作人</th>
+            <th>单号</th>
+            <th>客户 / 供应商</th>
+            <th>款数</th>
+            <th>数量</th>
+            <th>金额</th>
           </tr>
         </thead>
         <tbody>
-          {movements.map((movement) => (
-            <tr key={movement.id}>
-              <td>{new Date(movement.createdAt).toLocaleString()}</td>
-              <td>{movement.type === "INBOUND" ? "入库" : "出库"}</td>
-              <td>
-                {movement.sku.styleNo} / {movement.sku.productName} / {movement.sku.color} / {movement.sku.size}
-              </td>
-              <td className={movement.quantityChange < 0 ? "danger-text" : "success-text"}>{movement.quantityChange}</td>
-              <td>{movement.balanceAfter}</td>
-              <td>{movement.operator}</td>
-            </tr>
-          ))}
-          {!movements.length && (
+          {documents.map((doc) => {
+            const isOpen = expanded === doc.key;
+            return (
+              <React.Fragment key={doc.key}>
+                <tr className="stock-doc-row" onClick={() => toggle(doc.key)}>
+                  <td>{new Date(doc.date).toLocaleDateString()}</td>
+                  <td>
+                    <span className={doc.kind === "INBOUND" ? "status-pill" : "status-pill shipped"}>
+                      {doc.kind === "INBOUND" ? "入库" : "出库/销售"}
+                    </span>
+                  </td>
+                  <td>{doc.kind === "INBOUND" ? `入库单 #${doc.id}` : `出库单 #${doc.id}`}</td>
+                  <td>{doc.party || "-"}</td>
+                  <td className="number-cell">{doc.items.length}</td>
+                  <td className={doc.kind === "INBOUND" ? "number-cell success-text" : "number-cell danger-text"}>
+                    {doc.kind === "INBOUND" ? "+" : "-"}
+                    {doc.totalQuantity}
+                  </td>
+                  <td className="number-cell">{doc.totalAmount ? formatMoneyValue(doc.totalAmount) : "-"}</td>
+                </tr>
+                {isOpen && (
+                  <tr className="stock-doc-detail-row">
+                    <td colSpan={7}>
+                      <div className="stock-doc-detail">
+                        {doc.note && <p className="hint">备注：{doc.note}</p>}
+                        <table className="stock-doc-items">
+                          <thead>
+                            <tr>
+                              <th>款号</th>
+                              <th>商品名称</th>
+                              <th>颜色</th>
+                              <th>尺码</th>
+                              <th>数量</th>
+                              <th>单价</th>
+                              <th>小计</th>
+                            </tr>
+                          </thead>
+                          <tbody>
+                            {doc.items.map((item, index) => {
+                              const price = Number(item.unitPrice || 0);
+                              return (
+                                <tr key={index}>
+                                  <td>{item.styleNo}</td>
+                                  <td>{item.productName}</td>
+                                  <td>{item.color}</td>
+                                  <td>{item.size}</td>
+                                  <td className="number-cell">{item.quantity}</td>
+                                  <td className="number-cell">{price ? formatMoneyValue(price) : "-"}</td>
+                                  <td className="number-cell">{price ? formatMoneyValue(price * item.quantity) : "-"}</td>
+                                </tr>
+                              );
+                            })}
+                          </tbody>
+                        </table>
+                      </div>
+                    </td>
+                  </tr>
+                )}
+              </React.Fragment>
+            );
+          })}
+          {!documents.length && (
             <tr>
-              <td colSpan={6} className="empty">
-                暂无流水
+              <td colSpan={7} className="empty">
+                暂无单据
               </td>
             </tr>
           )}

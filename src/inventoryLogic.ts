@@ -1,4 +1,4 @@
-import type { InventoryRow, QuickSkuForm, RecognizedInboundItem, SalesOrderLine, SalesOrderPayments, Sku } from "./types";
+import type { InboundOrderApi, InventoryRow, OutboundOrderApi, QuickSkuForm, RecognizedInboundItem, SalesOrderLine, SalesOrderPayments, Sku, StockDocument, StockDocumentItem } from "./types";
 
 export const defaultSizes = "S, M, L, XL, XXL";
 export const inboundDefaultSizes = "M, L, XL, 2XL, 3XL, 4XL, 5XL";
@@ -455,4 +455,129 @@ export function mergeRecognizedInboundItems(form: QuickSkuForm, items: Recognize
     sizesText: Array.from(sizes).sort(compareSizes).join(", "),
     quantities
   };
+}
+
+export type StyleOption = { styleNo: string; productName: string };
+
+// 款号搜索：款号 / 商品名都能命中，前缀匹配优先，再子串匹配
+export function filterStyleOptions(options: StyleOption[], query: string, limit = 20): StyleOption[] {
+  const q = query.trim().toLowerCase();
+  if (!q) return options.slice(0, limit);
+  const scored: Array<{ option: StyleOption; rank: number }> = [];
+  for (const option of options) {
+    const styleNo = option.styleNo.toLowerCase();
+    const name = (option.productName || "").toLowerCase();
+    let rank = -1;
+    if (styleNo.startsWith(q)) rank = 0;
+    else if (name.startsWith(q)) rank = 1;
+    else if (styleNo.includes(q)) rank = 2;
+    else if (name.includes(q)) rank = 3;
+    if (rank >= 0) scored.push({ option, rank });
+  }
+  scored.sort(
+    (a, b) => a.rank - b.rank || a.option.styleNo.localeCompare(b.option.styleNo, "zh-CN", { numeric: true })
+  );
+  return scored.slice(0, limit).map((entry) => entry.option);
+}
+
+// 客户名称推荐：前缀（首字）匹配优先，再子串匹配
+export function rankCustomerMatches<T extends { name: string }>(customers: T[], query: string, limit = 20): T[] {
+  const q = query.trim();
+  if (!q) return customers.slice(0, limit);
+  const lower = q.toLowerCase();
+  const scored: Array<{ item: T; rank: number }> = [];
+  for (const item of customers) {
+    const name = item.name.toLowerCase();
+    let rank = -1;
+    if (name.startsWith(lower)) rank = 0;
+    else if (name.includes(lower)) rank = 1;
+    if (rank >= 0) scored.push({ item, rank });
+  }
+  scored.sort((a, b) => a.rank - b.rank || a.item.name.localeCompare(b.item.name, "zh-CN", { numeric: true }));
+  return scored.slice(0, limit).map((entry) => entry.item);
+}
+
+function toMoney(value: unknown) {
+  const n = Number(value ?? 0);
+  return Number.isFinite(n) ? n : 0;
+}
+
+// 把入库单 + 出库单合并成"按单"的库存流水文档，按日期倒序
+export function buildStockDocuments(inbound: InboundOrderApi[], outbound: OutboundOrderApi[]): StockDocument[] {
+  const docs: StockDocument[] = [];
+
+  for (const order of inbound) {
+    const items: StockDocumentItem[] = order.items.map((item) => ({
+      styleNo: item.sku.product.styleNo,
+      productName: item.sku.product.name,
+      color: item.sku.color,
+      size: item.sku.size,
+      quantity: item.quantity,
+      unitPrice: String(item.unitCost ?? "0")
+    }));
+    docs.push({
+      key: `IN-${order.id}`,
+      kind: "INBOUND",
+      id: order.id,
+      date: order.inboundDate || order.createdAt,
+      party: order.supplier,
+      note: order.note || "",
+      totalQuantity: items.reduce((sum, item) => sum + item.quantity, 0),
+      totalAmount: items.reduce((sum, item) => sum + item.quantity * toMoney(item.unitPrice), 0),
+      items
+    });
+  }
+
+  for (const order of outbound) {
+    const items: StockDocumentItem[] = order.items.map((item) => ({
+      styleNo: item.sku.product.styleNo,
+      productName: item.sku.product.name,
+      color: item.sku.color,
+      size: item.sku.size,
+      quantity: item.quantity,
+      unitPrice: String(item.unitPrice ?? "0")
+    }));
+    docs.push({
+      key: `OUT-${order.id}`,
+      kind: "OUTBOUND",
+      id: order.id,
+      date: order.outboundDate || order.createdAt,
+      party: order.customer + (order.channel ? `（${order.channel}）` : ""),
+      note: order.note || "",
+      totalQuantity: items.reduce((sum, item) => sum + item.quantity, 0),
+      totalAmount: items.reduce((sum, item) => sum + item.quantity * toMoney(item.unitPrice), 0),
+      items
+    });
+  }
+
+  return docs.sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime());
+}
+
+// 按类型/关键字/日期区间筛选库存流水文档
+export function filterStockDocuments(
+  docs: StockDocument[],
+  filters: { kind?: string; q?: string; from?: string; to?: string }
+): StockDocument[] {
+  const q = (filters.q || "").trim().toLowerCase();
+  const from = filters.from ? new Date(filters.from).getTime() : null;
+  const to = filters.to ? new Date(`${filters.to}T23:59:59`).getTime() : null;
+  return docs.filter((doc) => {
+    if (filters.kind === "INBOUND" || filters.kind === "OUTBOUND") {
+      if (doc.kind !== filters.kind) return false;
+    }
+    const time = new Date(doc.date).getTime();
+    if (from !== null && time < from) return false;
+    if (to !== null && time > to) return false;
+    if (q) {
+      const hay = [
+        doc.party,
+        doc.note,
+        ...doc.items.flatMap((item) => [item.styleNo, item.productName, item.color, item.size])
+      ]
+        .join(" ")
+        .toLowerCase();
+      if (!hay.includes(q)) return false;
+    }
+    return true;
+  });
 }
