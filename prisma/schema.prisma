@@ -78,6 +78,7 @@ model Sku {
   movements        StockMovement[]
 
   @@unique([productId, color, size])
+  @@index([productId])
   @@map("skus")
 }
 
@@ -100,6 +101,7 @@ model InboundOrder {
   items       InboundOrderItem[]
   movements   StockMovement[]
 
+  @@index([createdAt])
   @@map("inbound_orders")
 }
 
@@ -112,6 +114,8 @@ model InboundOrderItem {
   inboundOrder   InboundOrder @relation(fields: [inboundOrderId], references: [id], onDelete: Cascade)
   sku            Sku          @relation(fields: [skuId], references: [id])
 
+  @@index([inboundOrderId])
+  @@index([skuId])
   @@map("inbound_order_items")
 }
 
@@ -126,6 +130,7 @@ model OutboundOrder {
   movements    StockMovement[]
   customerOrder CustomerOrder?
 
+  @@index([createdAt])
   @@map("outbound_orders")
 }
 
@@ -138,6 +143,8 @@ model OutboundOrderItem {
   outboundOrder   OutboundOrder @relation(fields: [outboundOrderId], references: [id], onDelete: Cascade)
   sku             Sku           @relation(fields: [skuId], references: [id])
 
+  @@index([outboundOrderId])
+  @@index([skuId])
   @@map("outbound_order_items")
 }
 
@@ -169,6 +176,10 @@ model CustomerOrder {
   outboundOrder   OutboundOrder?      @relation(fields: [outboundOrderId], references: [id])
   customerRef     Customer?           @relation(fields: [customerId], references: [id])
 
+  @@index([customerId])
+  @@index([customer])
+  @@index([status, createdAt])
+  @@index([createdAt])
   @@map("customer_orders")
 }
 
@@ -181,6 +192,8 @@ model CustomerOrderItem {
   customerOrder   CustomerOrder @relation(fields: [customerOrderId], references: [id], onDelete: Cascade)
   sku             Sku           @relation(fields: [skuId], references: [id])
 
+  @@index([customerOrderId])
+  @@index([skuId])
   @@map("customer_order_items")
 }
 
@@ -199,5 +212,11 @@ model StockMovement {
   outboundOrder   OutboundOrder?  @relation(fields: [outboundOrderId], references: [id])
   operator        User?          @relation(fields: [operatorId], references: [id])
 
+  @@index([skuId])
+  @@index([createdAt])
+  @@index([type, createdAt])
+  @@index([inboundOrderId])
+  @@index([outboundOrderId])
+  @@index([operatorId])
   @@map("stock_movements")
 }
