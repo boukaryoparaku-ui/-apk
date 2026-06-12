@@ -3004,7 +3004,20 @@ function SalesOrderLineTable({
               const showColorFallback = !!line.color && !colorOptions.includes(line.color);
               return (
                 <tr key={line.id}>
-                  <td className="number-cell">{index + 1}</td>
+                  <td className="sales-index-cell">
+                    <div className="sales-index-stack">
+                      <span className="sales-index-number">{index + 1}</span>
+                      <button
+                        className="small sales-add-same"
+                        type="button"
+                        onClick={() => onAddSameStyle(line.id)}
+                        disabled={!line.styleNo}
+                        title={line.styleNo ? "在下方再加一行同款 SKU" : "请先填写款号"}
+                      >
+                        +同款
+                      </button>
+                    </div>
+                  </td>
                   <td className="sales-product-cell">
                     <div className="sales-product-fields">
                       <input value={line.styleNo} onChange={(event) => updateLine(line.id, { styleNo: event.target.value })} placeholder="款号" />
@@ -3051,20 +3064,9 @@ function SalesOrderLineTable({
                     <input value={line.note} onChange={(event) => updateLine(line.id, { note: event.target.value })} />
                   </td>
                   <td>
-                    <div className="sales-line-actions">
-                      <button
-                        className="small"
-                        type="button"
-                        onClick={() => onAddSameStyle(line.id)}
-                        disabled={!line.styleNo}
-                        title={line.styleNo ? "在下方再加一行同款 SKU" : "请先填写款号"}
-                      >
-                        +同款
-                      </button>
-                      <button className="small danger-button" type="button" onClick={() => removeLine(line.id)}>
-                        删除
-                      </button>
-                    </div>
+                    <button className="small danger-button" type="button" onClick={() => removeLine(line.id)}>
+                      删除
+                    </button>
                   </td>
                 </tr>
               );
