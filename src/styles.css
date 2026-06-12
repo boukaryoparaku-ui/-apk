@@ -582,7 +582,13 @@ nav button.active::before {
 }
 
 .sales-action-col {
-  width: 82px;
+  width: 132px;
+}
+
+.sales-line-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
 }
 
 .sales-product-cell {

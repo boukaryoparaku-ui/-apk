@@ -1733,6 +1733,35 @@ function App() {
     [allSkus, selectedOutboundStyle]
   );
   const salesSizes = useMemo(() => salesOrderSizes(customerOrderLines), [customerOrderLines]);
+  // 销售行颜色下拉的候选：按款号聚合该款号下所有 SKU 的颜色（用 inventoryLogic 中已有的去重排序逻辑）
+  const salesColorsByStyle = useMemo(() => {
+    const map = new Map<string, string[]>();
+    const styles = new Set(allSkus.map((sku) => sku.styleNo).filter(Boolean));
+    for (const styleNo of styles) {
+      map.set(styleNo, knownColorsForStyle(allSkus, styleNo));
+    }
+    return map;
+  }, [allSkus]);
+  // 在指定行后再插入一行同款 SKU（复用基础信息，数量留空），便于一键给同款多颜色开单
+  function addSameStyleLineAfter(afterId: string) {
+    setCustomerOrderLines((current) => {
+      const index = current.findIndex((line) => line.id === afterId);
+      if (index < 0) return current;
+      const baseLine = current[index];
+      const styleNo = baseLine.styleNo;
+      const styleSkus = styleNo ? allSkus.filter((sku) => sku.styleNo === styleNo) : [];
+      const newLine = styleSkus.length
+        ? createSalesOrderLineFromSkus(styleSkus, createSalesLineId())
+        : { ...createEmptySalesOrderLine(createSalesLineId()), styleNo: baseLine.styleNo, productName: baseLine.productName };
+      // 默认换一个未在前序行中使用过的颜色，减少手动改动
+      const usedColors = current
+        .filter((line) => line.styleNo === styleNo && line.color)
+        .map((line) => line.color);
+      const candidate = (salesColorsByStyle.get(styleNo) ?? []).find((color) => !usedColors.includes(color));
+      newLine.color = candidate ?? "";
+      return [...current.slice(0, index + 1), newLine, ...current.slice(index + 1)];
+    });
+  }
   const filteredCustomerOrders = useMemo(
     () => (orderListDate ? customerOrders.filter((order) => order.orderDate.slice(0, 10) === orderListDate) : customerOrders),
     [customerOrders, orderListDate]
@@ -2180,7 +2209,13 @@ function App() {
                   </div>
                 )}
               </div>
-              <SalesOrderLineTable sizes={salesSizes} lines={customerOrderLines} setLines={setCustomerOrderLines} />
+              <SalesOrderLineTable
+                sizes={salesSizes}
+                lines={customerOrderLines}
+                setLines={setCustomerOrderLines}
+                colorsByStyle={salesColorsByStyle}
+                onAddSameStyle={addSameStyleLineAfter}
+              />
               <p className="hint">保存销售开单会立即创建出库单、扣减库存并写入库存流水；历史待发货订单仍可在列表中发货扣库存。</p>
             </form>
             <div className="order-list-toolbar">
@@ -2891,11 +2926,15 @@ function StyleSearchBox({
 function SalesOrderLineTable({
   sizes,
   lines,
-  setLines
+  setLines,
+  colorsByStyle,
+  onAddSameStyle
 }: {
   sizes: string[];
   lines: SalesOrderLine[];
   setLines: React.Dispatch<React.SetStateAction<SalesOrderLine[]>>;
+  colorsByStyle: Map<string, string[]>;
+  onAddSameStyle: (afterId: string) => void;
 }) {
   const visibleSizes = sizes.length ? sizes : parseFallbackSizes();
 
@@ -2958,44 +2997,78 @@ function SalesOrderLineTable({
         </thead>
         <tbody>
           {lines.length ? (
-            lines.map((line, index) => (
-              <tr key={line.id}>
-                <td className="number-cell">{index + 1}</td>
-                <td className="sales-product-cell">
-                  <div className="sales-product-fields">
-                    <input value={line.styleNo} onChange={(event) => updateLine(line.id, { styleNo: event.target.value })} placeholder="款号" />
-                    <input value={line.productName} onChange={(event) => updateLine(line.id, { productName: event.target.value })} placeholder="商品名称" />
-                  </div>
-                </td>
-                <td>
-                  <input value={line.color} onChange={(event) => updateLine(line.id, { color: event.target.value })} placeholder="颜色" />
-                </td>
-                {visibleSizes.map((size) => (
-                  <td key={size}>
-                    <input
-                      className="matrix-input"
-                      type="number"
-                      min="0"
-                      value={line.quantities[size] || ""}
-                      onChange={(event) => updateQuantity(line, size, event.target.value)}
-                    />
+            lines.map((line, index) => {
+              const colorOptions = colorsByStyle.get(line.styleNo) ?? [];
+              // 当前颜色不在候选里（比如款号为空、或 AI 识别出系统未登记的颜色）时，
+              // 先把当前值作为一个独立选项保留，避免下拉选不到当前值导致丢失。
+              const showColorFallback = !!line.color && !colorOptions.includes(line.color);
+              return (
+                <tr key={line.id}>
+                  <td className="number-cell">{index + 1}</td>
+                  <td className="sales-product-cell">
+                    <div className="sales-product-fields">
+                      <input value={line.styleNo} onChange={(event) => updateLine(line.id, { styleNo: event.target.value })} placeholder="款号" />
+                      <input value={line.productName} onChange={(event) => updateLine(line.id, { productName: event.target.value })} placeholder="商品名称" />
+                    </div>
                   </td>
-                ))}
-                <td className="number-cell">{salesLineQuantity(line) || ""}</td>
-                <td>
-                  <input type="number" min="0" step="0.01" value={line.unitPrice} onChange={(event) => updateLine(line.id, { unitPrice: event.target.value })} />
-                </td>
-                <td className="number-cell">{salesLineSubtotal(line) ? formatMoneyValue(salesLineSubtotal(line)) : ""}</td>
-                <td>
-                  <input value={line.note} onChange={(event) => updateLine(line.id, { note: event.target.value })} />
-                </td>
-                <td>
-                  <button className="small danger-button" type="button" onClick={() => removeLine(line.id)}>
-                    删除
-                  </button>
-                </td>
-              </tr>
-            ))
+                  <td>
+                    <select
+                      value={line.color}
+                      onChange={(event) => updateLine(line.id, { color: event.target.value })}
+                      disabled={!colorOptions.length && !showColorFallback}
+                      title={!colorOptions.length && !showColorFallback ? "请先选择已登记款号" : "选择颜色"}
+                    >
+                      <option value="">请选择颜色</option>
+                      {colorOptions.map((color) => (
+                        <option key={color} value={color}>
+                          {color}
+                        </option>
+                      ))}
+                      {showColorFallback && (
+                        <option key="__current" value={line.color}>
+                          {line.color}
+                        </option>
+                      )}
+                    </select>
+                  </td>
+                  {visibleSizes.map((size) => (
+                    <td key={size}>
+                      <input
+                        className="matrix-input"
+                        type="number"
+                        min="0"
+                        value={line.quantities[size] || ""}
+                        onChange={(event) => updateQuantity(line, size, event.target.value)}
+                      />
+                    </td>
+                  ))}
+                  <td className="number-cell">{salesLineQuantity(line) || ""}</td>
+                  <td>
+                    <input type="number" min="0" step="0.01" value={line.unitPrice} onChange={(event) => updateLine(line.id, { unitPrice: event.target.value })} />
+                  </td>
+                  <td className="number-cell">{salesLineSubtotal(line) ? formatMoneyValue(salesLineSubtotal(line)) : ""}</td>
+                  <td>
+                    <input value={line.note} onChange={(event) => updateLine(line.id, { note: event.target.value })} />
+                  </td>
+                  <td>
+                    <div className="sales-line-actions">
+                      <button
+                        className="small"
+                        type="button"
+                        onClick={() => onAddSameStyle(line.id)}
+                        disabled={!line.styleNo}
+                        title={line.styleNo ? "在下方再加一行同款 SKU" : "请先填写款号"}
+                      >
+                        +同款
+                      </button>
+                      <button className="small danger-button" type="button" onClick={() => removeLine(line.id)}>
+                        删除
+                      </button>
+                    </div>
+                  </td>
+                </tr>
+              );
+            })
           ) : (
             <tr>
               <td colSpan={visibleSizes.length + 8} className="empty">
