@@ -3,6 +3,7 @@ import { fileURLToPath } from "node:url";
 import crypto from "node:crypto";
 import fs from "node:fs";
 import bcrypt from "bcryptjs";
+import compression from "compression";
 import sessionFileStore from "session-file-store";
 import express, { type NextFunction, type Request, type Response } from "express";
 import session from "express-session";
@@ -35,6 +36,9 @@ const skuInclude = {
   }
 } as const;
 
+// gzip 压缩文本类响应（HTML/JS/CSS/JSON），对低带宽云服务器明显省流量、提速。
+// compression 默认跳过已压缩内容（图片/PDF）和带 Cache-Control: no-transform 的响应。
+app.use(compression());
 app.use(express.json({ limit: "1mb" }));
 app.use(
   session({
@@ -362,6 +366,29 @@ export function normalizeRecognizedStyleNo(value: string) {
   return value === "7262" ? "T262" : value;
 }
 
+// 兼容 AI 返回的数量既可能是数字（2）也可能是字符串（"2"）。
+// 旧实现用 text() 处理，数字类型会被当成非字符串丢弃，导致数量全部回退成 1。
+export function parseQuantity(value: unknown): number {
+  if (typeof value === "number" && Number.isFinite(value)) return Math.trunc(value);
+  if (typeof value === "string") {
+    const trimmed = value.trim();
+    if (!trimmed) return 1; // 模型没给数量时默认 1 件
+    const parsed = Number(trimmed);
+    return Number.isFinite(parsed) ? Math.trunc(parsed) : NaN;
+  }
+  // undefined / null / 其它类型：视为未提供，默认 1 件
+  if (value === undefined || value === null) return 1;
+  return NaN;
+}
+
+// 单价同样兼容数字和字符串；空/未提供返回 undefined。
+function parseUnitCost(value: unknown): string | undefined {
+  if (value === undefined || value === null) return undefined;
+  if (typeof value === "number") return Number.isFinite(value) ? String(value) : undefined;
+  const trimmed = text(value);
+  return trimmed ? trimmed : undefined;
+}
+
 export function normalizeRecognizedItems(value: unknown): RecognizedInboundItem[] {
   const payload = value as { items?: unknown };
   const rawItems = Array.isArray(payload?.items) ? payload.items : [];
@@ -369,8 +396,7 @@ export function normalizeRecognizedItems(value: unknown): RecognizedInboundItem[
     const row = item as Record<string, unknown>;
     const color = normalizeRecognizedColor(text(row.color));
     const size = normalizeRecognizedSize(text(row.size));
-    const quantityText = text(row.quantity);
-    const quantity = quantityText ? Number(quantityText) : 1;
+    const quantity = parseQuantity(row.quantity);
     if (!color || !size || !Number.isInteger(quantity) || quantity <= 0) return [];
     return [
       {
@@ -380,7 +406,7 @@ export function normalizeRecognizedItems(value: unknown): RecognizedInboundItem[
         color,
         size,
         quantity,
-        unitCost: row.unitCost === undefined || row.unitCost === null ? undefined : text(row.unitCost)
+        unitCost: parseUnitCost(row.unitCost)
       }
     ];
   });

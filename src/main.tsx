@@ -163,13 +163,48 @@ function today() {
   return new Date().toISOString().slice(0, 10);
 }
 
-function fileToDataUrl(file: File) {
+function readFileAsDataUrl(file: Blob) {
   return new Promise<string>((resolve, reject) => {
     const reader = new FileReader();
     reader.onload = () => resolve(String(reader.result || ""));
     reader.onerror = () => reject(new Error("图片读取失败"));
     reader.readAsDataURL(file);
   });
+}
+
+// 上传前在浏览器里压缩图片：把最长边缩到 maxEdge，转成 JPEG(quality)，
+// 显著减小上传体积（手机原图常 2~4MB，压缩后多为 200~500KB），
+// 这个分辨率对订单表格文字识别完全够用。任何环节失败都回退为原图，保证不影响功能。
+async function fileToDataUrl(file: File, maxEdge = 1600, quality = 0.8) {
+  // 非图片或环境不支持时，直接读原文件
+  if (!file.type.startsWith("image/") || typeof document === "undefined") {
+    return readFileAsDataUrl(file);
+  }
+  try {
+    const originalUrl = await readFileAsDataUrl(file);
+    const img = await new Promise<HTMLImageElement>((resolve, reject) => {
+      const image = new Image();
+      image.onload = () => resolve(image);
+      image.onerror = () => reject(new Error("图片解码失败"));
+      image.src = originalUrl;
+    });
+    const longest = Math.max(img.width, img.height);
+    const scale = longest > maxEdge ? maxEdge / longest : 1;
+    const targetW = Math.round(img.width * scale);
+    const targetH = Math.round(img.height * scale);
+    const canvas = document.createElement("canvas");
+    canvas.width = targetW;
+    canvas.height = targetH;
+    const ctx = canvas.getContext("2d");
+    if (!ctx) return originalUrl;
+    ctx.drawImage(img, 0, 0, targetW, targetH);
+    const compressed = canvas.toDataURL("image/jpeg", quality);
+    // 万一压缩结果异常（比某些极小图反而更大），取较小的那个
+    return compressed && compressed.length < originalUrl.length ? compressed : originalUrl;
+  } catch {
+    // 压缩链路任何异常都回退原图读取
+    return readFileAsDataUrl(file);
+  }
 }
 
 function safeFilename(value: string) {
