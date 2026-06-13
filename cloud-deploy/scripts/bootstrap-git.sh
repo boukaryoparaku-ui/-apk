@@ -33,10 +33,25 @@ if [ -z "$REPO_URL" ]; then
   exit 1
 fi
 
-if ! command -v git >/dev/null 2>&1 || ! command -v curl >/dev/null 2>&1 || ! command -v openssl >/dev/null 2>&1; then
+install_base_packages() {
   echo "Installing base packages..."
-  apt-get update
-  apt-get install -y ca-certificates curl git openssl
+  if command -v apt-get >/dev/null 2>&1; then
+    apt-get update
+    apt-get install -y ca-certificates curl git openssl
+  elif command -v dnf >/dev/null 2>&1; then
+    dnf install -y ca-certificates curl git openssl
+  elif command -v yum >/dev/null 2>&1; then
+    yum install -y ca-certificates curl git openssl
+  elif command -v apk >/dev/null 2>&1; then
+    apk add --no-cache ca-certificates curl git openssl
+  else
+    echo "No supported package manager found. Please install git, curl and openssl manually."
+    exit 1
+  fi
+}
+
+if ! command -v git >/dev/null 2>&1 || ! command -v curl >/dev/null 2>&1 || ! command -v openssl >/dev/null 2>&1; then
+  install_base_packages
 fi
 
 if ! command -v docker >/dev/null 2>&1; then
