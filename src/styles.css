@@ -984,6 +984,18 @@ tr:last-child td {
   font-weight: 600;
 }
 
+.backup-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+
+.hidden-file-input {
+  display: none;
+}
+
 .backup-grid {
   display: grid;
   grid-template-columns: repeat(4, minmax(0, 1fr));
@@ -1239,7 +1251,6 @@ tr:last-child td {
     grid-template-columns: 1fr;
   }
 }
-
 
 
 

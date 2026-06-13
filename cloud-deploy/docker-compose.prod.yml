@@ -1,0 +1,62 @@
+# 生产环境 Docker Compose 配置
+#
+# 使用方法：
+#   1. 复制 .env.production.example 为 .env 并修改密钥
+#   2. docker compose -f cloud-deploy/docker-compose.prod.yml up -d --build
+#
+# 更新方法：
+#   git pull
+#   docker compose -f cloud-deploy/docker-compose.prod.yml up -d --build
+
+services:
+  app:
+    build:
+      context: ..
+      dockerfile: cloud-deploy/Dockerfile
+    container_name: fashion-inventory
+    environment:
+      # 数据库路径 - 指向持久化卷
+      DATABASE_URL: file:/data/data.db
+      # Session 存储目录
+      SESSION_STORE_DIR: /data/sessions
+      # 从 .env 文件读取敏感配置
+      SESSION_SECRET: ${SESSION_SECRET}
+      AI_CONFIG_SECRET: ${AI_CONFIG_SECRET}
+      ADMIN_USERNAME: ${ADMIN_USERNAME:-admin}
+      ADMIN_PASSWORD: ${ADMIN_PASSWORD}
+      # 应用配置
+      NODE_ENV: production
+      PORT: 3000
+      TZ: ${TZ:-Asia/Shanghai}
+    ports:
+      # 宿主机端口:容器端口
+      - "${HOST_PORT:-3001}:3000"
+    volumes:
+      # 持久化数据卷 - 保存数据库和会话
+      - app_data:/data
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:3000/api/healthz"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+    # 资源限制（根据服务器配置调整）
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+        reservations:
+          memory: 256M
+    # 日志轮转
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+volumes:
+  # 持久化卷 - 存储数据库和会话文件
+  # 即使容器删除，数据仍然保留
+  app_data:
+    driver: local

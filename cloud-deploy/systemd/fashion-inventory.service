@@ -1,0 +1,46 @@
+# 服装供销存系统 systemd 服务单元示例
+#
+# 用法：
+#   1. 把项目放到 /opt/fashion-inventory（或自定义路径，记得同步改下面）
+#   2. 在该目录放好 .env（参考 .env.example）
+#   3. 复制本文件到 /etc/systemd/system/fashion-inventory.service
+#   4. 按下面命令启用
+#
+#   sudo cp deploy/fashion-inventory.service /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable fashion-inventory
+#   sudo systemctl start fashion-inventory
+#   sudo systemctl status fashion-inventory
+#   journalctl -u fashion-inventory -f      # 看实时日志
+#
+# 注意：ExecStart 用绝对路径的 node。先 `which node` 确认路径，
+#       用 nvm 装的 node 路径可能不是 /usr/bin/node。
+
+[Unit]
+Description=Fashion Inventory (服装供销存系统)
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/fashion-inventory
+EnvironmentFile=/opt/fashion-inventory/.env
+ExecStart=/usr/bin/node dist/server/index.js
+Restart=always
+RestartSec=3
+
+# 跑服务的系统用户，建议专门建一个非 root 用户：
+#   sudo useradd --system --no-create-home --shell /usr/sbin/nologin fashion
+#   sudo chown -R fashion:fashion /opt/fashion-inventory
+User=fashion
+Group=fashion
+
+# 内存上限。超过会被 OOM 杀掉再由 Restart=always 拉起。
+# 1G 内存的小服务器建议 512M；若同机还跑 PostgreSQL，可降到 384M 观察。
+MemoryMax=512M
+
+# 一点基础加固
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

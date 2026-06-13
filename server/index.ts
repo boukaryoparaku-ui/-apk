@@ -39,7 +39,7 @@ const skuInclude = {
 // gzip 压缩文本类响应（HTML/JS/CSS/JSON），对低带宽云服务器明显省流量、提速。
 // compression 默认跳过已压缩内容（图片/PDF）和带 Cache-Control: no-transform 的响应。
 app.use(compression());
-app.use(express.json({ limit: "1mb" }));
+app.use(express.json({ limit: "20mb" }));
 app.use(
   session({
     store: new FileStore({
@@ -646,6 +646,59 @@ function decimalToString(value: unknown) {
   return value && typeof (value as { toString?: () => string }).toString === "function" ? (value as { toString: () => string }).toString() : "";
 }
 
+function backupArray(value: unknown): any[] {
+  return Array.isArray(value) ? value : [];
+}
+
+function backupDate(value: unknown, fallback = new Date()) {
+  if (!value) return fallback;
+  const date = new Date(value as string);
+  return Number.isNaN(date.getTime()) ? fallback : date;
+}
+
+function backupText(value: unknown, fallback = "") {
+  return typeof value === "string" ? value : fallback;
+}
+
+function backupOptionalText(value: unknown) {
+  const valueText = backupText(value).trim();
+  return valueText || null;
+}
+
+function backupNumber(value: unknown, fallback = 0) {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : fallback;
+}
+
+function backupBool(value: unknown, fallback = true) {
+  return typeof value === "boolean" ? value : fallback;
+}
+
+function backupDecimal(value: unknown, fallback = "0") {
+  const raw = value === null || value === undefined || value === "" ? fallback : String(value);
+  return new Prisma.Decimal(raw);
+}
+
+function backupId(value: unknown) {
+  const id = Number(value);
+  if (!Number.isInteger(id) || id <= 0) {
+    throw new Error("备份文件包含无效的 ID");
+  }
+  return id;
+}
+
+function validateBackupPayload(payload: any) {
+  if (!payload || typeof payload !== "object") {
+    throw new Error("备份文件格式不正确");
+  }
+  if (payload.schemaVersion !== "fashion-inventory-backup/v1") {
+    throw new Error("备份文件版本不支持");
+  }
+  if (!payload.catalog || !Array.isArray(payload.catalog.products)) {
+    throw new Error("备份文件缺少商品/SKU 数据");
+  }
+}
+
 function mmToPt(value: number) {
   return (value * 72) / 25.4;
 }
@@ -1205,7 +1258,7 @@ app.delete(
 app.get(
   "/api/backup/export",
   asyncHandler(async (req, res) => {
-    const [products, skuRecords, inboundOrders, outboundOrders, customerOrders, movements, user] = await Promise.all([
+    const [products, skuRecords, customers, inboundOrders, outboundOrders, customerOrders, movements, user] = await Promise.all([
       prisma.product.findMany({
         include: { skus: { include: { inventoryBalance: true } } },
         orderBy: { styleNo: "asc" }
@@ -1213,6 +1266,9 @@ app.get(
       prisma.sku.findMany({
         include: { product: true, inventoryBalance: true, outboundItems: { select: { quantity: true } } },
         orderBy: [{ product: { styleNo: "asc" } }, { color: "asc" }, { size: "asc" }]
+      }),
+      prisma.customer.findMany({
+        orderBy: { name: "asc" }
       }),
       prisma.inboundOrder.findMany({
         include: { items: { include: { sku: { include: { product: true } } } } },
@@ -1267,6 +1323,7 @@ app.get(
       },
       counts: {
         products: products.length,
+        customers: customers.length,
         skus: skuSnapshot.length,
         inboundOrders: inboundOrders.length,
         outboundOrders: outboundOrders.length,
@@ -1280,6 +1337,14 @@ app.get(
         skus: skuSnapshot
       },
       catalog: {
+        customers: customers.map((customer) => ({
+          id: customer.id,
+          name: customer.name,
+          phone: customer.phone ?? "",
+          note: customer.note ?? "",
+          createdAt: customer.createdAt,
+          updatedAt: customer.updatedAt
+        })),
         products: products.map((product) => ({
           id: product.id,
           styleNo: product.styleNo,
@@ -1354,6 +1419,241 @@ app.get(
     res.setHeader("Content-Type", "application/json; charset=utf-8");
     res.setHeader("Content-Disposition", `attachment; filename="${filename}"`);
     res.json(payload);
+  })
+);
+
+app.post(
+  "/api/backup/import",
+  asyncHandler(async (req, res) => {
+    const payload = req.body;
+    validateBackupPayload(payload);
+
+    const products = backupArray(payload.catalog?.products);
+    const customers = backupArray(payload.catalog?.customers);
+    const inboundOrders = backupArray(payload.orders?.inbound);
+    const outboundOrders = backupArray(payload.orders?.outbound);
+    const customerOrders = backupArray(payload.orders?.customer);
+    const stockMovements = backupArray(payload.stockMovements);
+    const now = new Date();
+
+    const result = await prisma.$transaction(
+      async (tx) => {
+        const users = await tx.user.findMany({ select: { id: true, username: true } });
+        const userIdByName = new Map(users.map((user) => [user.username, user.id]));
+
+        await tx.stockMovement.deleteMany();
+        await tx.customerOrderItem.deleteMany();
+        await tx.inboundOrderItem.deleteMany();
+        await tx.outboundOrderItem.deleteMany();
+        await tx.customerOrder.deleteMany();
+        await tx.inboundOrder.deleteMany();
+        await tx.outboundOrder.deleteMany();
+        await tx.inventoryBalance.deleteMany();
+        await tx.sku.deleteMany();
+        await tx.product.deleteMany();
+        await tx.customer.deleteMany();
+
+        const customerIdSet = new Set<number>();
+        for (const customer of customers) {
+          const id = backupId(customer.id);
+          customerIdSet.add(id);
+          await tx.customer.create({
+            data: {
+              id,
+              name: backupText(customer.name).trim() || `客户-${id}`,
+              phone: backupOptionalText(customer.phone),
+              note: backupOptionalText(customer.note),
+              createdAt: backupDate(customer.createdAt, now),
+              updatedAt: backupDate(customer.updatedAt, now)
+            }
+          });
+        }
+
+        if (customers.length === 0) {
+          const names = new Set<string>();
+          for (const order of customerOrders) {
+            const name = backupText(order.customer).trim();
+            if (name) names.add(name);
+          }
+          for (const name of names) {
+            await tx.customer.create({ data: { name } });
+          }
+        }
+
+        const skuIds = new Set<number>();
+        for (const product of products) {
+          const productId = backupId(product.id);
+          await tx.product.create({
+            data: {
+              id: productId,
+              styleNo: backupText(product.styleNo).trim() || `STYLE-${productId}`,
+              name: backupText(product.name).trim() || backupText(product.productName).trim() || `商品-${productId}`,
+              supplier: backupOptionalText(product.supplier),
+              category: backupOptionalText(product.category),
+              brand: backupOptionalText(product.brand),
+              note: backupOptionalText(product.note),
+              createdAt: backupDate(product.createdAt, now),
+              updatedAt: backupDate(product.updatedAt, now)
+            }
+          });
+
+          for (const sku of backupArray(product.skus)) {
+            const skuId = backupId(sku.id);
+            skuIds.add(skuId);
+            await tx.sku.create({
+              data: {
+                id: skuId,
+                productId,
+                color: backupText(sku.color).trim() || "未命名颜色",
+                size: backupText(sku.size).trim() || "未命名尺码",
+                barcode: backupOptionalText(sku.barcode),
+                retailPrice: sku.retailPrice === "" || sku.retailPrice === null || sku.retailPrice === undefined ? null : backupDecimal(sku.retailPrice),
+                isActive: backupBool(sku.isActive, true),
+                createdAt: backupDate(sku.createdAt, now),
+                updatedAt: backupDate(sku.updatedAt, now)
+              }
+            });
+            await tx.inventoryBalance.create({
+              data: {
+                skuId,
+                quantity: backupNumber(sku.quantity, 0)
+              }
+            });
+          }
+        }
+
+        for (const order of inboundOrders) {
+          const orderId = backupId(order.id);
+          await tx.inboundOrder.create({
+            data: {
+              id: orderId,
+              supplier: backupText(order.supplier).trim() || "未填写供应商",
+              inboundDate: backupDate(order.inboundDate, now),
+              note: backupOptionalText(order.note),
+              createdAt: backupDate(order.createdAt, now)
+            }
+          });
+          for (const item of backupArray(order.items)) {
+            const skuId = backupId(item.skuId);
+            if (!skuIds.has(skuId)) throw new Error(`备份文件引用了不存在的 SKU：${skuId}`);
+            await tx.inboundOrderItem.create({
+              data: {
+                id: backupId(item.id),
+                inboundOrderId: orderId,
+                skuId,
+                quantity: backupNumber(item.quantity, 0),
+                unitCost: backupDecimal(item.unitCost, "0")
+              }
+            });
+          }
+        }
+
+        for (const order of outboundOrders) {
+          const orderId = backupId(order.id);
+          await tx.outboundOrder.create({
+            data: {
+              id: orderId,
+              customer: backupText(order.customer).trim() || "未填写客户",
+              channel: backupOptionalText(order.channel),
+              outboundDate: backupDate(order.outboundDate, now),
+              note: backupOptionalText(order.note),
+              createdAt: backupDate(order.createdAt, now)
+            }
+          });
+          for (const item of backupArray(order.items)) {
+            const skuId = backupId(item.skuId);
+            if (!skuIds.has(skuId)) throw new Error(`备份文件引用了不存在的 SKU：${skuId}`);
+            await tx.outboundOrderItem.create({
+              data: {
+                id: backupId(item.id),
+                outboundOrderId: orderId,
+                skuId,
+                quantity: backupNumber(item.quantity, 0),
+                unitPrice: backupDecimal(item.unitPrice, "0")
+              }
+            });
+          }
+        }
+
+        for (const order of customerOrders) {
+          const orderId = backupId(order.id);
+          const customerId = order.customerId && customerIdSet.has(Number(order.customerId)) ? Number(order.customerId) : null;
+          const outboundOrderId = order.outboundOrderId ? Number(order.outboundOrderId) : null;
+          await tx.customerOrder.create({
+            data: {
+              id: orderId,
+              customer: backupText(order.customer).trim() || "未填写客户",
+              customerId,
+              orderNo: backupOptionalText(order.orderNo),
+              channel: backupOptionalText(order.channel),
+              orderDate: backupDate(order.orderDate, now),
+              note: backupOptionalText(order.note),
+              status: backupText(order.status) === "SHIPPED" ? "SHIPPED" : "PENDING",
+              shippedAt: order.shippedAt ? backupDate(order.shippedAt, now) : null,
+              printedAt: order.printedAt ? backupDate(order.printedAt, now) : null,
+              outboundOrderId: outboundOrderId && outboundOrderId > 0 ? outboundOrderId : null,
+              amountDue: backupDecimal(order.amountDue, "0"),
+              paidAmount: backupDecimal(order.paidAmount, "0"),
+              unpaidAmount: backupDecimal(order.unpaidAmount, "0"),
+              changeAmount: backupDecimal(order.changeAmount, "0"),
+              paymentWechat: backupDecimal(order.paymentWechat, "0"),
+              paymentCash: backupDecimal(order.paymentCash, "0"),
+              paymentAlipay: backupDecimal(order.paymentAlipay, "0"),
+              paymentCard: backupDecimal(order.paymentCard, "0"),
+              paymentScan: backupDecimal(order.paymentScan, "0"),
+              paymentTransfer: backupDecimal(order.paymentTransfer, "0"),
+              createdAt: backupDate(order.createdAt, now),
+              updatedAt: backupDate(order.updatedAt, now)
+            }
+          });
+          for (const item of backupArray(order.items)) {
+            const skuId = backupId(item.skuId);
+            if (!skuIds.has(skuId)) throw new Error(`备份文件引用了不存在的 SKU：${skuId}`);
+            await tx.customerOrderItem.create({
+              data: {
+                id: backupId(item.id),
+                customerOrderId: orderId,
+                skuId,
+                quantity: backupNumber(item.quantity, 0),
+                unitPrice: backupDecimal(item.unitPrice, "0")
+              }
+            });
+          }
+        }
+
+        for (const movement of stockMovements) {
+          const skuId = backupId(movement.skuId);
+          if (!skuIds.has(skuId)) throw new Error(`备份文件引用了不存在的 SKU：${skuId}`);
+          const operatorName = backupText(movement.operator).trim();
+          await tx.stockMovement.create({
+            data: {
+              id: backupId(movement.id),
+              skuId,
+              type: backupText(movement.type) || "ADJUST",
+              quantityChange: backupNumber(movement.quantityChange, 0),
+              balanceAfter: backupNumber(movement.balanceAfter, 0),
+              inboundOrderId: movement.inboundOrderId ? Number(movement.inboundOrderId) : null,
+              outboundOrderId: movement.outboundOrderId ? Number(movement.outboundOrderId) : null,
+              operatorId: operatorName ? userIdByName.get(operatorName) ?? null : null,
+              createdAt: backupDate(movement.createdAt, now)
+            }
+          });
+        }
+
+        return {
+          products: products.length,
+          customers: customers.length,
+          skus: skuIds.size,
+          inboundOrders: inboundOrders.length,
+          outboundOrders: outboundOrders.length,
+          customerOrders: customerOrders.length,
+          stockMovements: stockMovements.length
+        };
+      },
+      { timeout: 30000 }
+    );
+
+    res.json({ ok: true, restored: result });
   })
 );
 
@@ -2042,6 +2342,124 @@ app.post(
     });
 
     res.json(formatCustomerOrder(shipped));
+  })
+);
+
+app.patch(
+  "/api/customer-orders/:id",
+  asyncHandler(async (req, res) => {
+    const updated = await prisma.$transaction(async (tx) => {
+      const existing = await tx.customerOrder.findUnique({
+        where: { id: Number(req.params.id) },
+        include: { items: true }
+      });
+      if (!existing) {
+        throw Object.assign(new Error("客户订单不存在"), { status: 404 });
+      }
+
+      // 如果订单已发货，需要先回退原有库存，更新后再重新扣减
+      const shouldAdjustStock = existing.status === "SHIPPED" || Boolean(existing.outboundOrderId);
+      if (shouldAdjustStock) {
+        for (const item of existing.items) {
+          await adjustStock(tx, item.skuId, item.quantity, "INBOUND", null, req.session.userId);
+        }
+      }
+
+      // 删除旧的订单明细
+      await tx.customerOrderItem.deleteMany({ where: { customerOrderId: existing.id } });
+
+      // 处理新的订单明细
+      const rawItems = orderItems(req.body);
+      const newItems = [];
+      for (const item of rawItems) {
+        const skuId = await findOrCreateSku(item, tx);
+        const quantity = positiveInt(item.quantity, "订单数量");
+        const unitPrice = decimalInput(item.unitPrice, "单价");
+        newItems.push({ skuId, quantity, unitPrice });
+      }
+
+      // 计算支付金额
+      const payments = {
+        paymentWechat: decimalInput(req.body.paymentWechat, "微信支付") || "0",
+        paymentCash: decimalInput(req.body.paymentCash, "现金") || "0",
+        paymentAlipay: decimalInput(req.body.paymentAlipay, "支付宝") || "0",
+        paymentCard: decimalInput(req.body.paymentCard, "刷卡") || "0",
+        paymentScan: decimalInput(req.body.paymentScan, "扫码") || "0",
+        paymentTransfer: decimalInput(req.body.paymentTransfer, "转账") || "0"
+      };
+      const paidAmount = Object.values(payments).reduce((sum, val) => sum.add(new Prisma.Decimal(val)), new Prisma.Decimal(0));
+      const amountDue = newItems.reduce((sum, item) => {
+        return sum.add(new Prisma.Decimal(item.unitPrice).mul(item.quantity));
+      }, new Prisma.Decimal(0));
+      const unpaidAmount = Prisma.Decimal.max(amountDue.sub(paidAmount), new Prisma.Decimal(0));
+      const changeAmount = Prisma.Decimal.max(paidAmount.sub(amountDue), new Prisma.Decimal(0));
+
+      // 更新客户订单
+      const order = await tx.customerOrder.update({
+        where: { id: existing.id },
+        data: {
+          customer: text(req.body.customer) || existing.customer,
+          customerId: req.body.customerId || existing.customerId,
+          orderNo: optionalText(req.body.orderNo),
+          channel: optionalText(req.body.channel),
+          orderDate: req.body.orderDate || existing.orderDate,
+          note: optionalText(req.body.note),
+          amountDue: amountDue.toFixed(2),
+          paidAmount: paidAmount.toFixed(2),
+          unpaidAmount: unpaidAmount.toFixed(2),
+          changeAmount: changeAmount.toFixed(2),
+          ...payments
+        }
+      });
+
+      // 创建新的订单明细
+      for (const item of newItems) {
+        await tx.customerOrderItem.create({
+          data: {
+            customerOrderId: order.id,
+            skuId: item.skuId,
+            quantity: item.quantity,
+            unitPrice: item.unitPrice
+          }
+        });
+      }
+
+      // 如果订单已发货，重新扣减库存并更新出库单
+      if (shouldAdjustStock && existing.outboundOrderId) {
+        // 删除旧的出库单明细
+        await tx.outboundOrderItem.deleteMany({ where: { outboundOrderId: existing.outboundOrderId } });
+
+        // 更新出库单
+        await tx.outboundOrder.update({
+          where: { id: existing.outboundOrderId },
+          data: {
+            customer: order.customer,
+            channel: order.channel,
+            note: order.note
+          }
+        });
+
+        // 创建新的出库单明细并扣减库存
+        for (const item of newItems) {
+          await tx.outboundOrderItem.create({
+            data: {
+              outboundOrderId: existing.outboundOrderId,
+              skuId: item.skuId,
+              quantity: item.quantity,
+              unitPrice: item.unitPrice
+            }
+          });
+          await adjustStock(tx, item.skuId, -item.quantity, "OUTBOUND", existing.outboundOrderId, req.session.userId);
+        }
+      }
+
+      return tx.customerOrder.findUnique({
+        where: { id: order.id },
+        include: { items: { include: { sku: { include: { product: true } } } } }
+      });
+    });
+
+    res.json(formatCustomerOrder(updated!));
   })
 );
 

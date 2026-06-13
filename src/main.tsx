@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from "react";
+import React, { useEffect, useMemo, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
 import {
   buildInboundFormFromStyle,
@@ -114,6 +114,7 @@ const emptySalesPayments: SalesOrderPayments = {
 
 const emptySalesOrder = {
   customer: "",
+  customerId: null as number | null,
   orderNo: "",
   channel: "",
   orderDate: today(),
@@ -1061,6 +1062,7 @@ function App() {
   const [selectedOutboundStyle, setSelectedOutboundStyle] = useState("");
   const [customerOrderLines, setCustomerOrderLines] = useState<SalesOrderLine[]>([]);
   const [selectedCustomerOrderStyle, setSelectedCustomerOrderStyle] = useState("");
+  const [editingOrderId, setEditingOrderId] = useState<number | null>(null);
   const [salesDrafts, setSalesDrafts] = useState<SalesOrderDraft[]>(() => loadSalesDrafts());
   const [outboundQuantities, setOutboundQuantities] = useState<Record<string, string>>({});
   const [movementFilters, setMovementFilters] = useState({ q: "", type: "", from: "", to: "" });
@@ -1079,6 +1081,8 @@ function App() {
   const [customerOrderAiLoading, setCustomerOrderAiLoading] = useState(false);
   const [customerOrderAiResult, setCustomerOrderAiResult] = useState<AiParseResponse | null>(null);
   const [backupLoading, setBackupLoading] = useState(false);
+  const [backupImportLoading, setBackupImportLoading] = useState(false);
+  const backupFileInputRef = useRef<HTMLInputElement | null>(null);
   const [managedUsers, setManagedUsers] = useState<ManagedUser[]>([]);
   const [customers, setCustomers] = useState<Customer[]>([]);
   const [customerForm, setCustomerForm] = useState({ name: "", phone: "", note: "" });
@@ -1302,6 +1306,7 @@ function App() {
     setCustomerOrderLines([]);
     setCustomerOrderAiResult(null);
     setCustomerOrderAiTextContent("");
+    setEditingOrderId(null);
     window.localStorage.removeItem(salesOrderAutosaveStorageKey);
   }
 
@@ -1666,15 +1671,25 @@ function App() {
   async function createCustomerOrder(event: React.FormEvent) {
     event.preventDefault();
     await submitWithFeedback(async () => {
-      await api<CustomerOrder>("/api/customer-orders", {
-        method: "POST",
-        body: JSON.stringify({
-          ...customerOrder,
-          items: collectSalesOrderItems(customerOrderLines)
-        })
-      });
+      if (editingOrderId) {
+        await api<CustomerOrder>(`/api/customer-orders/${editingOrderId}`, {
+          method: "PATCH",
+          body: JSON.stringify({
+            ...customerOrder,
+            items: collectSalesOrderItems(customerOrderLines)
+          })
+        });
+      } else {
+        await api<CustomerOrder>("/api/customer-orders", {
+          method: "POST",
+          body: JSON.stringify({
+            ...customerOrder,
+            items: collectSalesOrderItems(customerOrderLines)
+          })
+        });
+      }
       resetSalesOrderForm();
-    }, "销售开单已保存，库存已扣减");
+    }, editingOrderId ? "订单已更新" : "销售开单已保存，库存已扣减");
   }
 
   async function shipCustomerOrder(order: CustomerOrder) {
@@ -1719,7 +1734,71 @@ function App() {
       await api<{ id: number; restoredStock: boolean; restoredQuantity: number }>(`/api/customer-orders/${order.id}`, {
         method: "DELETE"
       });
+      if (editingOrderId === order.id) {
+        resetSalesOrderForm();
+      }
     }, order.status === "SHIPPED" ? "销售订单已删除，库存已回退" : "销售订单已删除");
+  }
+
+  function editCustomerOrder(order: CustomerOrder) {
+    setEditingOrderId(order.id);
+    setCustomerOrder({
+      customer: order.customer,
+      customerId: order.customerId || null,
+      orderNo: order.orderNo,
+      channel: order.channel,
+      orderDate: order.orderDate.slice(0, 10),
+      note: order.note,
+      paymentWechat: order.paymentWechat,
+      paymentCash: order.paymentCash,
+      paymentAlipay: order.paymentAlipay,
+      paymentCard: order.paymentCard,
+      paymentScan: order.paymentScan,
+      paymentTransfer: order.paymentTransfer
+    });
+
+    const lines: SalesOrderLine[] = [];
+    const sizesByKey = new Map<string, Set<string>>();
+    const quantitiesByKey = new Map<string, Record<string, string>>();
+
+    order.items.forEach(item => {
+      const key = `${item.styleNo}::${item.color}::${item.unitPrice}`;
+      if (!sizesByKey.has(key)) {
+        sizesByKey.set(key, new Set());
+        quantitiesByKey.set(key, {});
+      }
+      sizesByKey.get(key)!.add(item.size);
+      quantitiesByKey.get(key)![item.size] = String(item.quantity);
+    });
+
+    const processedKeys = new Set<string>();
+    order.items.forEach(item => {
+      const key = `${item.styleNo}::${item.color}::${item.unitPrice}`;
+      if (processedKeys.has(key)) return;
+      processedKeys.add(key);
+
+      const sizes = Array.from(sizesByKey.get(key)!).sort(compareSizes);
+      const quantities = quantitiesByKey.get(key)!;
+
+      lines.push({
+        id: createSalesLineId(),
+        styleNo: item.styleNo,
+        productName: item.productName,
+        supplier: "",
+        category: "",
+        brand: "",
+        retailPrice: "",
+        color: item.color,
+        unitPrice: item.unitPrice,
+        note: "",
+        sizes,
+        quantities
+      });
+    });
+
+    setCustomerOrderLines(lines);
+    setMessage(`正在编辑订单：${order.customer} - ${order.orderNo || `订单${order.id}`}`);
+    window.scrollTo({ top: 0, behavior: "smooth" });
   }
 
   async function toggleSku(sku: Sku) {
@@ -1753,6 +1832,36 @@ function App() {
       setError((err as Error).message);
     } finally {
       setBackupLoading(false);
+    }
+  }
+
+  async function importBackup(event: React.ChangeEvent<HTMLInputElement>) {
+    const file = event.target.files?.[0];
+    if (!file) return;
+
+    setError("");
+    setMessage("");
+    const confirmation = window.prompt("恢复备份会覆盖当前商品、库存、单据、客户和流水数据。请输入“恢复”继续。");
+    if (confirmation !== "恢复") {
+      event.target.value = "";
+      return;
+    }
+
+    setBackupImportLoading(true);
+    try {
+      const text = await file.text();
+      const payload = JSON.parse(text);
+      const result = await api<{ ok: boolean; restored: { products: number; skus: number; customerOrders: number; stockMovements: number } }>("/api/backup/import", {
+        method: "POST",
+        body: JSON.stringify(payload)
+      });
+      await refreshAll();
+      setMessage(`备份已恢复：商品 ${result.restored.products}，SKU ${result.restored.skus}，开单 ${result.restored.customerOrders}，流水 ${result.restored.stockMovements}`);
+    } catch (err) {
+      setError((err as Error).message || "备份恢复失败");
+    } finally {
+      setBackupImportLoading(false);
+      event.target.value = "";
     }
   }
 
@@ -2089,7 +2198,7 @@ function App() {
             <form onSubmit={createCustomerOrder} className="form-block sales-order-form">
               <div className="sales-actions">
                 <button className="primary" type="submit">
-                  保存并扣库存
+                  {editingOrderId ? "更新订单" : "保存并扣库存"}
                 </button>
                 <button className="small" type="button" onClick={hangCustomerOrderDraft}>
                   挂单
@@ -2098,9 +2207,11 @@ function App() {
                   取未保存
                 </button>
                 <button className="ghost" type="button" onClick={resetSalesOrderForm}>
-                  清空
+                  {editingOrderId ? "取消编辑" : "清空"}
                 </button>
-                <span className="hint">本机草稿 {salesDrafts.length} 单</span>
+                <span className="hint">
+                  {editingOrderId ? "编辑模式" : `本机草稿 ${salesDrafts.length} 单`}
+                </span>
               </div>
 
               <div className="sales-header-grid">
@@ -2251,7 +2362,11 @@ function App() {
                 colorsByStyle={salesColorsByStyle}
                 onAddSameStyle={addSameStyleLineAfter}
               />
-              <p className="hint">保存销售开单会立即创建出库单、扣减库存并写入库存流水；历史待发货订单仍可在列表中发货扣库存。</p>
+              <p className="hint">
+                {editingOrderId
+                  ? "更新订单会重新计算库存扣减；如订单已发货，请先确认库存变化是否符合预期。"
+                  : "保存销售开单会立即创建出库单、扣减库存并写入库存流水；历史待发货订单仍可在列表中发货扣库存。"}
+              </p>
             </form>
             <div className="order-list-toolbar">
               <label>
@@ -2275,6 +2390,7 @@ function App() {
               orders={filteredCustomerOrders}
               onShip={shipCustomerOrder}
               onDelete={deleteCustomerOrder}
+              onEdit={editCustomerOrder}
               printTemplate={printTemplate}
               onPrinted={markOrdersPrinted}
               selectedIds={selectedOrderIds}
@@ -2393,6 +2509,7 @@ function App() {
                       await deleteCustomerOrder(order);
                       await viewCustomerOrders(viewingCustomer);
                     }}
+                    onEdit={editCustomerOrder}
                     printTemplate={printTemplate}
                     onPrinted={async (ids) => {
                       await markOrdersPrinted(ids);
@@ -2450,11 +2567,17 @@ function App() {
             <div className="backup-panel">
               <div>
                 <h3>一键打包业务数据</h3>
-                <p className="hint">备份包包含库存快照、商品/SKU、入库单、出库单、销售开单和库存流水，不包含已保存的 AI API Key。</p>
+                <p className="hint">备份包包含客户、库存快照、商品/SKU、入库单、出库单、销售开单和库存流水，不包含已保存的 AI API Key。</p>
               </div>
-              <button className="primary" type="button" onClick={exportBackup} disabled={backupLoading}>
-                {backupLoading ? "正在打包" : "下载备份包"}
-              </button>
+              <div className="backup-actions">
+                <button className="primary" type="button" onClick={exportBackup} disabled={backupLoading || backupImportLoading}>
+                  {backupLoading ? "正在打包" : "下载备份包"}
+                </button>
+                <button className="small" type="button" onClick={() => backupFileInputRef.current?.click()} disabled={backupLoading || backupImportLoading}>
+                  {backupImportLoading ? "正在恢复" : "恢复备份包"}
+                </button>
+                <input ref={backupFileInputRef} className="hidden-file-input" type="file" accept="application/json,.json" onChange={importBackup} />
+              </div>
             </div>
             <div className="backup-grid">
               <div className="backup-card">
@@ -3123,6 +3246,7 @@ function CustomerOrderTable({
   orders,
   onShip,
   onDelete,
+  onEdit,
   printTemplate,
   onPrinted,
   selectedIds,
@@ -3131,6 +3255,7 @@ function CustomerOrderTable({
   orders: CustomerOrder[];
   onShip: (order: CustomerOrder) => void;
   onDelete: (order: CustomerOrder) => void;
+  onEdit?: (order: CustomerOrder) => void;
   printTemplate: PrintTemplateSettings;
   onPrinted?: (ids: number[]) => void;
   selectedIds?: number[];
@@ -3218,6 +3343,11 @@ function CustomerOrderTable({
                     <button className="small" onClick={() => printCustomerOrderPdf(order, printTemplate, onPrinted)}>
                       PDF打印
                     </button>
+                    {onEdit && (
+                      <button className="small" onClick={() => onEdit(order)}>
+                        编辑
+                      </button>
+                    )}
                     {order.status === "PENDING" ? (
                       <button className="small" onClick={() => onShip(order)}>
                         发货扣库存
